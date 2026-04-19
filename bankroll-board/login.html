@@ -330,7 +330,10 @@
       btn.innerHTML = '<span class="spinner" style="border-color:rgba(255,255,255,0.3);border-top-color:#fff"></span> Redirecting...';
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo: window.location.origin + '/bankroll-board/lobby.html' }
+        options: {
+          // Dynamically build the redirect URL so it works on localhost AND GitHub Pages
+          redirectTo: window.location.href.replace('login.html', 'lobby.html')
+        }
       });
       if (error) { showStatus(error.message); btn.disabled = false; btn.innerHTML = 'Continue with Google'; }
     };
@@ -349,7 +352,7 @@
         if (isSignUp) {
           const { error } = await supabase.auth.signUp({
             email, password,
-            options: { emailRedirectTo: window.location.origin + '/bankroll-board/lobby.html' }
+            options: { emailRedirectTo: window.location.href.replace('login.html', 'lobby.html') }
           });
           if (error) throw error;
           showStatus('✅ Check your email for a confirmation link!', 'success');
