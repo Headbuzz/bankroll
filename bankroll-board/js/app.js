@@ -421,12 +421,15 @@ function showCenterBuyDecision(space) {
     } else resolve('pass');
   });
 }
-function flashCenterEvent(text, imageSrc, priceText, ms = 2000) {
+// flashCenterEvent: shows notification and keeps it on screen (persistent).
+// The `ms` param is used ONLY for sequencing/pacing (caller waits before continuing),
+// NOT for auto-dismiss. The notification stays until the next event or roll start.
+function flashCenterEvent(text, imageSrc, priceText, ms = 1200) {
+  // Cancel any pending flash state (no-op since we no longer auto-dismiss)
+  if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
   showCenterEvent(text, imageSrc, priceText);
-  if (pendingFlashTimer) clearTimeout(pendingFlashTimer);
-  return new Promise(r => {
-    pendingFlashTimer = setTimeout(() => { pendingFlashTimer = null; showCenterIdle(); r(); }, ms);
-  });
+  // Wait `ms` for pacing (callers chain events sequentially) but DON'T dismiss
+  return new Promise(r => { pendingFlashTimer = setTimeout(() => { pendingFlashTimer = null; r(); }, ms); });
 }
 
 
@@ -506,11 +509,16 @@ function getPathIds(fromId, steps) {
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Track which players currently have a floating token moving
+// syncBoardState skips these players to prevent ghost tokens during animation
+const animatingTokens = new Set();
+
 async function animateTokenAlongPath(playerId, fromId, steps, skipGenesisBonus = false) {
   const player = state.players[playerId];
   const path = getPathIds(fromId, steps);
   if (!path.length) return;
   player.position = path[path.length - 1];
+  animatingTokens.add(playerId); // LOCK: prevent syncBoardState ghost token during animation
   removeStaticToken(playerId);
   const token = document.createElement('img');
   token.className = 'token-float'; token.src = IMG + player.tokenImg; token.draggable = false;
@@ -524,7 +532,6 @@ async function animateTokenAlongPath(playerId, fromId, steps, skipGenesisBonus =
     if (pos) { token.style.left = pos.x + 'px'; token.style.top = pos.y + 'px'; }
     
     if (spaceId === 1 && !skipGenesisBonus) {
-      // Only add balance if not already handled by the caller
       player.balance += 200; renderHUD();
       flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
       animateCoins('bank', playerId, 5);
@@ -534,7 +541,9 @@ async function animateTokenAlongPath(playerId, fromId, steps, skipGenesisBonus =
     await sleep(200);
   }
   token.classList.add('token-float--bounce'); await sleep(400);
-  token.remove(); placeStaticToken(playerId);
+  token.remove();
+  animatingTokens.delete(playerId); // UNLOCK
+  placeStaticToken(playerId);
   return path[path.length - 1];
 }
 
@@ -910,6 +919,7 @@ async function onRollClick() {
   state.rolling = true;
   stopTurnTimer();
   hideBettingPanel();
+  showCenterIdle(); // Clear any persistent notification from the previous turn
 
   const ap = state.turn;
   const player = state.players[ap];
@@ -982,9 +992,9 @@ async function onRollClick() {
           finalEvent = { type: 'BUY', p: ap, landed, newRent };
         } else { showCenterIdle(); }
       } else if (player.balance < 0) {
-        await flashCenterEvent(`${player.name} is in debt \u2014 can't buy!`, landed.image, null, 1200);
+        await flashCenterEvent(`${player.name} is in debt — can't buy!`, null, null, 1200);
       } else {
-        await flashCenterEvent(`${player.name} can't afford ${landed.name}!`, landed.image, `$${landed.price}`, 1500);
+        await flashCenterEvent(`${player.name} can't afford ${landed.name}!`, null, `$${landed.price}`, 1500);
       }
     } else if (state.owners[landed.id] !== ap) {
       const rentOwed = calculateRent(landed);
@@ -993,7 +1003,8 @@ async function onRollClick() {
       state.players[owner].balance += rentOwed;
       renderHUD();
       await animateCoins(ap, owner, Math.min(Math.ceil(rentOwed / 40), 8));
-      await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, landed.image, `-$${rentOwed}`, 1500);
+      // No property image for rent — keeps notification clean and readable
+      await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, null, `-$${rentOwed}`, 1500);
       checkBankruptcy(ap);
       checkWin();
       finalEvent = { type: 'RENT', p: ap, owner, rent: rentOwed, landed };
@@ -1552,9 +1563,28 @@ function pushSyncState(eventPayload = null) {
   }).catch(e => console.error('[sync] DB push error:', e));
 }
 
-// FIX E: Smart merge — update Domain Model from server, preserve local View Model.
-// Handles BOTH broadcast payloads (with fullState) and postgres_changes payloads.
+// Serialized playback queue: prevents concurrent calls from racing/dropping events.
+// If playbackRender is already running, we queue the latest state and drain after.
+let _isPlayingBack = false;
+let _playbackQueue = null;
+
 async function playbackRender(payloadState) {
+  if (_isPlayingBack) {
+    _playbackQueue = payloadState; // keep only latest — no animation backlog
+    return;
+  }
+  _isPlayingBack = true;
+  try { await _playbackImpl(payloadState); } finally {
+    _isPlayingBack = false;
+    if (_playbackQueue) {
+      const next = _playbackQueue;
+      _playbackQueue = null;
+      await playbackRender(next); // drain queue
+    }
+  }
+}
+
+async function _playbackImpl(payloadState) {
   if (!payloadState) return;
   const ev = payloadState.last_event;
   const prevTurn = state.turn; // capture BEFORE merge to detect turn change
@@ -1578,7 +1608,7 @@ async function playbackRender(payloadState) {
     } else if (ev.type === 'RENT') {
       await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
       const payerName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await flashCenterEvent(`${payerName} paid $${ev.rent} rent`, ev.landed.image, `-$${ev.rent}`, 1500);
+      await flashCenterEvent(`${payerName} paid $${ev.rent} rent to ${payloadState.players?.[ev.owner]?.name || 'opponent'}`, null, `-$${ev.rent}`, 1500);
     } else if (ev.type === 'BET_PLACED') {
       const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
       await flashCenterEvent(`\uD83C\uDFAF ${bettorName} bet on ${ev.spaceName}!`, null, '-$150', 1200);
@@ -1651,6 +1681,7 @@ function syncBoardState() {
     }
   });
   ['p1', 'p2'].forEach(p => {
+    if (animatingTokens.has(p)) return; // skip: float animation is in progress
     removeStaticToken(p);
     placeStaticToken(p);
   });
