@@ -144,7 +144,7 @@ shuffleDeck();
 /* ── Game State ── */
 let state = {
   turn: 'p1',
-  phase: 'idle', // idle | rolling | trading | betting
+  phase: 'idle',
   players: {
     p1: { name: 'Player 1', balance: 1000, position: 1, tokenImg: 'redmarker.png', jailTurns: 0 },
     p2: { name: 'Player 2', balance: 1025, position: 1, tokenImg: 'bluemarker.png', jailTurns: 0 },
@@ -157,6 +157,7 @@ let state = {
   gameOver: false,
   trade: { active: false, proposer: null, step: null, offerProps: [], offerCash: 0, counterProps: [], counterCash: 0, timer: null, timeLeft: 0 },
   bet: { active: false, bettor: null, betType: null, betValue: null },
+  afk: { p1: 0, p2: 0 }, // consecutive AFK strike counter per player
 };
 
 
@@ -386,8 +387,13 @@ function showCenterEvent(text, imageSrc, priceText) {
   if (eventPrice) { if (priceText) { eventPrice.textContent = priceText; eventPrice.style.display = 'block'; } else { eventPrice.style.display = 'none'; } }
   if (eventActions) eventActions.style.display = 'none';
 }
+// Pending flash timer — cleared when a decision prompt takes over
+let pendingFlashTimer = null;
+
 function showCenterDecision(text, imageSrc, buttons) {
   return new Promise(resolve => {
+    // Cancel any pending flash so it doesn't wipe the decision prompt
+    if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
     showCenterEvent(text, imageSrc, null);
     if (eventActions) {
       eventActions.style.display = 'flex';
@@ -401,6 +407,8 @@ function showCenterDecision(text, imageSrc, buttons) {
 }
 function showCenterBuyDecision(space) {
   return new Promise(resolve => {
+    // Cancel any pending flash so it doesn't wipe the decision prompt
+    if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
     showCenterEvent(space.name, space.image, `$${space.price}`);
     if (eventActions) {
       eventActions.style.display = 'flex';
@@ -415,7 +423,10 @@ function showCenterBuyDecision(space) {
 }
 function flashCenterEvent(text, imageSrc, priceText, ms = 2000) {
   showCenterEvent(text, imageSrc, priceText);
-  return new Promise(r => setTimeout(() => { showCenterIdle(); r(); }, ms));
+  if (pendingFlashTimer) clearTimeout(pendingFlashTimer);
+  return new Promise(r => {
+    pendingFlashTimer = setTimeout(() => { pendingFlashTimer = null; showCenterIdle(); r(); }, ms);
+  });
 }
 
 
@@ -930,12 +941,16 @@ async function onRollClick() {
   await animateTokenAlongPath(ap, oldPos, d1, true); // skipGenesisBonus=true (already applied)
   if (passedGenesis) {
     renderHUD();
-    flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
+    // MUST be awaited — otherwise the $200 flash timer fires during the buy decision and clears it!
+    await flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
     animateCoins('bank', ap, 5);
     checkWin();
   } else {
     renderHUD();
   }
+
+  // AFK guard: reset strike counter since we actually rolled
+  if (state.afk) state.afk[ap] = 0;
 
   resumeTurnTimer();
   const landed = BOARD.find(s => s.id === newPos);
@@ -951,18 +966,20 @@ async function onRollClick() {
         const decision = await showCenterBuyDecision(landed);
         if (decision === 'buy') {
           player.balance -= landed.price;
-          const poolContrib = Math.round(landed.price * 0.3); // 30% to staking pool
+          const poolContrib = Math.round(landed.price * 0.3);
           state.stakingPool += poolContrib;
           state.owners[landed.id] = ap;
           updateTileOwnerBand(landed.id, ap);
           renderHUD();
           await animateCoins(ap, 'bank', 4);
-          await flashCenterEvent(`${player.name} bought ${landed.name}!`, landed.image, `$${landed.price}`, 1500);
+          // Show rent value after purchase (not the price)
+          const newRent = calculateRent(landed);
+          await flashCenterEvent(`${player.name} bought ${landed.name}!`, landed.image, `Rent: $${newRent}`, 1800);
           if (landed.type === 'city' && hasMonopoly(ap, landed.tier)) {
             await flashCenterEvent('\uD83C\uDFC6 MONOPOLY SECURED!', null, 'Rent doubled! You can build!', 2000);
           }
           checkWin();
-          finalEvent = { type: 'BUY', p: ap, landed };
+          finalEvent = { type: 'BUY', p: ap, landed, newRent };
         } else { showCenterIdle(); }
       } else if (player.balance < 0) {
         await flashCenterEvent(`${player.name} is in debt \u2014 can't buy!`, landed.image, null, 1200);
@@ -1329,17 +1346,37 @@ function updateTimerUI() {
 }
 
 function handleTurnTimeout() {
-  // Only the active turn player handles timeout — prevents both players from switching simultaneously
+  // Only the active turn player's client handles AFK — prevents dual timeout switches
   if (state.gameOver || state.turn !== localId) return;
+
   if (window.resolveActiveDecision) {
+    // Player is mid-decision (buy/jail choice) — resolve it and move on
     window.resolveActiveDecision();
-  } else if (!state.rolling) {
-    state.rolling = true;
-    flashCenterEvent(`${state.players[state.turn].name} ran out of time!`, null, '', 1500).then(() => {
-      state.rolling = false;
-      switchTurn(null);
-    });
+    return;
   }
+
+  if (state.rolling) return; // already mid-animation
+
+  // AFK strike tracking
+  if (!state.afk) state.afk = { p1: 0, p2: 0 };
+  state.afk[localId] = (state.afk[localId] || 0) + 1;
+  const strikes = state.afk[localId];
+
+  if (strikes >= 3) {
+    // 3rd AFK: kick the AFK player — opponent wins
+    state.gameOver = true;
+    const winner = localId === 'p1' ? 'p2' : 'p1';
+    pushSyncState({ type: 'KICK', kicked: localId });
+    flashCenterEvent(`${state.players[localId].name} was kicked for inactivity!`, null, '\uD83D\uDEAB 3x AFK', 2500).then(() => {
+      showVictory(winner);
+    });
+    return;
+  }
+
+  // Auto-roll for AFK player (strikes 1 and 2)
+  flashCenterEvent(`${state.players[localId].name} is AFK! Auto-rolling... (${strikes}/2)`, null, '\u23F0', 800).then(() => {
+    onRollClick();
+  });
 }
 
 
@@ -1465,6 +1502,7 @@ function getCleanSyncState() {
 // pushSyncState: FIRE-AND-FORGET — never blocks the caller.
 // Fast path: Supabase Broadcast delivers the event to P2 in <200ms.
 // Slow path: Edge Function persists state to DB (~1-5s), fires postgres_changes.
+// Full state is included in broadcast so P2 can immediately apply balance/ownership changes.
 function pushSyncState(eventPayload = null) {
   if (!localId) return;
 
@@ -1475,14 +1513,24 @@ function pushSyncState(eventPayload = null) {
     state.last_event = null;
   }
 
-  // FAST PATH: Broadcast the event immediately via WebSocket (P2 gets this in <200ms)
-  // Only broadcast animation events — state-only pushes don't need fast path
+  // FAST PATH: Broadcast event + FULL STATE so P2 can apply changes instantly
   if (channel && state.last_event) {
     channel.send({
       type: 'broadcast',
       event: 'game_event',
-      payload: { ev: state.last_event, sentBy: localId }
-    }).catch(() => {}); // ignore broadcast errors (best-effort)
+      payload: {
+        ev: state.last_event,
+        fullState: getCleanSyncState(), // P2 merges this immediately — no waiting for DB
+        sentBy: localId
+      }
+    }).catch(() => {});
+  } else if (channel && !state.last_event) {
+    // State-only push (no event) — still broadcast full state for instant merge
+    channel.send({
+      type: 'broadcast',
+      event: 'game_event',
+      payload: { ev: null, fullState: getCleanSyncState(), sentBy: localId }
+    }).catch(() => {});
   }
 
   // SLOW PATH: Persist full state to DB in the background (no await)
@@ -1505,33 +1553,47 @@ function pushSyncState(eventPayload = null) {
 }
 
 // FIX E: Smart merge — update Domain Model from server, preserve local View Model.
+// Handles BOTH broadcast payloads (with fullState) and postgres_changes payloads.
 async function playbackRender(payloadState) {
   if (!payloadState) return;
   const ev = payloadState.last_event;
-  const prevTurn = state.turn;
-
+  const prevTurn = state.turn; // capture BEFORE merge to detect turn change
   if (ev && ev.id !== lastProcessedEventId) {
     lastProcessedEventId = ev.id;
+
     if (ev.type === 'ROLL') {
-      // ev.oldPos = pre-roll position, ev.newPos = destination
+      state.rolling = false;
+      // Only animate ROLL — state merge happens after via mergeServerState
       await animateDice(ev.dice);
       await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis);
+      if (ev.passedGenesis) {
+        await flashCenterEvent(`${payloadState.players?.[ev.p]?.name || 'Opponent'} collected $200!`, null, '+$200', 1200);
+        animateCoins('bank', ev.p, 5);
+      }
     } else if (ev.type === 'BUY') {
+      // Animate + merge state immediately from broadcast payload (no waiting for DB)
       await animateCoins(ev.p, 'bank', 4);
-      await flashCenterEvent(`${payloadState.players[ev.p]?.name} bought ${ev.landed.name}!`, ev.landed.image, `$${ev.landed.price}`, 1500);
+      const buyerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      await flashCenterEvent(`${buyerName} bought ${ev.landed.name}!`, ev.landed.image, `Rent: $${ev.newRent ?? ev.landed.price}`, 1800);
     } else if (ev.type === 'RENT') {
       await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
-      await flashCenterEvent(`${payloadState.players[ev.p]?.name} paid $${ev.rent} rent`, ev.landed.image, `-$${ev.rent}`, 1500);
+      const payerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      await flashCenterEvent(`${payerName} paid $${ev.rent} rent`, ev.landed.image, `-$${ev.rent}`, 1500);
     } else if (ev.type === 'BET_PLACED') {
-      // Opponent placed a bet — show notification to the rolling player
       const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
-      await flashCenterEvent(`\uD83C\uDFAF ${bettorName} bet on ${ev.spaceName}!`, null, '$150', 1200);
+      await flashCenterEvent(`\uD83C\uDFAF ${bettorName} bet on ${ev.spaceName}!`, null, '-$150', 1200);
+    } else if (ev.type === 'KICK') {
+      const kickedName = payloadState.players?.[ev.kicked]?.name || 'Opponent';
+      await flashCenterEvent(`${kickedName} was kicked for 3x AFK!`, null, '\uD83D\uDEAB', 2500);
+      const winner = ev.kicked === 'p1' ? 'p2' : 'p1';
+      showVictory(winner);
+      return;
     }
   }
 
   mergeServerState(payloadState);
 
-  // Restart timer only when turn changed (detected from payload, not local state which just merged)
+  // Restart timer only when turn changed
   if (payloadState.turn && payloadState.turn !== prevTurn) {
     startTurnTimer();
     const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
@@ -1649,27 +1711,33 @@ async function init() {
   // Use module-scope `channel` variable so pushSyncState can call channel.send()
   channel = supabase.channel(`room:${gameId}`);
   
-  // FAST PATH: game_event broadcast — P2 animates dice+token in <200ms (no DB round-trip)
+  // FAST PATH: game_event broadcast — instant delivery to opponent (<200ms)
   channel.on('broadcast', { event: 'game_event' }, async (payload) => {
-    const { ev, sentBy } = payload.payload ?? {};
-    if (!ev || sentBy === localId) return; // suppress self
-    if (ev.id === lastProcessedEventId) return; // already processed
-    lastProcessedEventId = ev.id; // mark so postgres_changes skips animation
+    const { ev, fullState, sentBy } = payload.payload ?? {};
+    if (sentBy === localId) return; // suppress self
 
-    if (ev.type === 'ROLL') {
+    // ROLL: animate immediately, mark as processed so postgres_changes skips animation
+    if (ev?.type === 'ROLL') {
+      if (ev.id === lastProcessedEventId) return;
+      lastProcessedEventId = ev.id;
       await animateDice(ev.dice);
       await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis);
       if (ev.passedGenesis) {
-        flashCenterEvent(`${state.players[ev.p]?.name || 'Opponent'} collected $200!`, null, '+$200', 1200);
+        await flashCenterEvent(`${state.players[ev.p]?.name || 'Opponent'} collected $200!`, null, '+$200', 1200);
         animateCoins('bank', ev.p, 5);
       }
-    } else if (ev.type === 'BET_PLACED') {
-      // Fast notification: opponent placed a bet on us — show immediately via broadcast
-      const bettorName = state.players?.[ev.bettor]?.name || 'Opponent';
-      animateCoins(ev.bettor, 'bank', 3); // show their coin drain on our screen
-      flashCenterEvent(`\uD83C\uDFAF ${bettorName} placed a bet on ${ev.spaceName}!`, null, '-$150', 1200);
+      // Merge the full state included in broadcast (has genesis balance, updated position)
+      if (fullState) mergeServerState(fullState);
+      renderHUD();
+      syncBoardState();
+      return;
     }
-    // BUY/RENT come via postgres_changes full state
+
+    // All other events: run via playbackRender using the full broadcast state
+    // This gives instant BUY/RENT/BET/KICK feedback WITHOUT waiting for DB round-trip
+    if (fullState) {
+      await playbackRender(fullState);
+    }
   });
 
   // SLOW PATH: postgres_changes — arrives after Edge Function persists state (~1-5s)
