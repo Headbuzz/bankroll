@@ -891,8 +891,7 @@ async function resolveBet(diceVal, landedSpace) {
    ============================================== */
 async function onRollClick() {
   if (state.rolling || state.gameOver || state.trade.active) return;
-  // Guard: only current turn player can roll
-  if (state.turn !== localId) return;
+  if (state.turn !== localId) return; // only active player rolls
   state.rolling = true;
   stopTurnTimer();
   hideBettingPanel();
@@ -904,45 +903,41 @@ async function onRollClick() {
     player.jailTurns--;
     await flashCenterEvent(`${player.name} is in Jail. ${player.jailTurns > 0 ? player.jailTurns + ' round(s) left.' : 'Released next turn!'}`, 'audit.png', '\uD83D\uDD12', 1800);
     state.rolling = false;
-    await pushSyncState(); // sync jail turn used
-    switchTurn();
+    await switchTurn(null); // jail state pushed inside switchTurn
     return;
   }
 
-  renderHUD();
   const d1 = Math.ceil(Math.random() * 6);
-  const oldPos = player.position; // capture BEFORE animation so remote player can animate from correct spot
-
-  // Compute new position before animation so it's in DB before P2 gets the event
+  const oldPos = player.position;
   let newPos = oldPos + d1;
-  if (newPos > 28) newPos -= 28;
   const passedGenesis = (oldPos + d1) > 28;
+  if (newPos > 28) newPos -= 28;
 
-  // Update local position immediately so state pushed to DB is correct
+  // Pre-apply position + genesis bonus so the DB push is the final truth
   player.position = newPos;
-  if (passedGenesis) {
-    player.balance += 200;
-  }
+  if (passedGenesis) player.balance += 200;
 
-  // Push ROLL event FIRST (P2 will animate from oldPos to newPos)
+  // PUSH 1: ROLL event — P2 gets this and animates. P1's own echo is suppressed by sentBy.
   await pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
 
-  // Local animation (runs in parallel with DB write)
+  // P1 local animations (P2 runs theirs when PUSH 1 arrives)
   await animateDice(d1);
-  await animateTokenAlongPath(ap, oldPos, d1, true); // true = skip genesis bonus (already handled above)
+  await animateTokenAlongPath(ap, oldPos, d1, true); // skipGenesisBonus=true (already applied above)
   if (passedGenesis) {
-    // Already added $200 above, just show the notification
     renderHUD();
     flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
     animateCoins('bank', ap, 5);
     checkWin();
+  } else {
+    renderHUD();
   }
 
   resumeTurnTimer();
   const landed = BOARD.find(s => s.id === newPos);
-
-  // Resolve prediction bet
   await resolveBet(d1, landed);
+
+  // Track what happened this turn for P2's final animation
+  let finalEvent = null;
 
   if (landed?.type === 'corner') { await handleCorner(landed, ap); }
 
@@ -959,12 +954,13 @@ async function onRollClick() {
           await animateCoins(ap, 'bank', 4);
           await flashCenterEvent(`${player.name} bought ${landed.name}!`, landed.image, `$${landed.price}`, 1500);
           if (landed.type === 'city' && hasMonopoly(ap, landed.tier)) {
-            await flashCenterEvent(`\uD83C\uDFC6 MONOPOLY SECURED \u2014 ${TIERS[landed.tier].label}!`, null, 'Rent doubled! You can build!', 2000);
+            await flashCenterEvent('\uD83C\uDFC6 MONOPOLY SECURED!', null, 'Rent doubled! You can build!', 2000);
           }
           checkWin();
+          finalEvent = { type: 'BUY', p: ap, landed };
         } else { showCenterIdle(); }
       } else if (player.balance < 0) {
-        await flashCenterEvent(`${player.name} is in debt \u2014 can't buy!`, landed.image, null, 1200);
+        await flashCenterEvent(`${player.name} is in debt — can't buy!`, landed.image, null, 1200);
       } else {
         await flashCenterEvent(`${player.name} can't afford ${landed.name}!`, landed.image, `$${landed.price}`, 1500);
       }
@@ -978,13 +974,13 @@ async function onRollClick() {
       await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, landed.image, `-$${rentOwed}`, 1500);
       checkBankruptcy(ap);
       checkWin();
+      finalEvent = { type: 'RENT', p: ap, owner, rent: rentOwed, landed };
     } else { showCenterIdle(); }
   }
 
   state.rolling = false;
-  state.bet = { active: false, bettor: null, betType: null, betValue: null }; // clear bet after turn
-  await pushSyncState(); // final clean sync with all balance/ownership changes
-  switchTurn();
+  // PUSH 2: switchTurn carries the final state (new turn + any BUY/RENT event for P2 to animate)
+  await switchTurn(finalEvent);
 }
 
 
@@ -1189,15 +1185,15 @@ function renderPlayerCard(elId, player, playerId) {
 /* ══════════════════════════════════════════════
    TURN SWITCHING
    ============================================== */
-function switchTurn() {
+// switchTurn optionally carries a finalEvent (BUY/RENT) so P2 sees the animation
+async function switchTurn(finalEvent = null) {
   if (state.gameOver) return;
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
-  state.bet = { active: false, bettor: null, betType: null, betValue: null }; // reset bet on new turn
-  pushSyncState(); // pushes new turn to DB; P2 will get this via Realtime
+  state.bet = { active: false, bettor: null, betType: null, betValue: null };
+  await pushSyncState(finalEvent); // single push carries new turn + optional buy/rent event
   startTurnTimer();
   renderHUD();
   hideBettingPanel();
-  // Show betting panel for the waiting player (the one NOT rolling next)
   const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
   if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150) {
     showBettingPanel(waitingPlayer);
@@ -1329,13 +1325,15 @@ function updateTimerUI() {
 }
 
 function handleTurnTimeout() {
+  // Only the active turn player handles timeout — prevents both players from switching simultaneously
+  if (state.gameOver || state.turn !== localId) return;
   if (window.resolveActiveDecision) {
     window.resolveActiveDecision();
   } else if (!state.rolling) {
     state.rolling = true;
     flashCenterEvent(`${state.players[state.turn].name} ran out of time!`, null, '', 1500).then(() => {
       state.rolling = false;
-      switchTurn();
+      switchTurn(null);
     });
   }
 }
@@ -1442,9 +1440,8 @@ function showChatToast(name, text, senderId) {
    MULTIPLAYER SYNC HELPERS
    ============================================== */
 
-// FIX A: Extract only Domain Model fields — strip all View Model / ephemeral UI flags.
-// rolling, trade.active, trade.timer must NEVER go to the database.
-// bet IS included because the rolling player needs to resolve the waiting player's bet.
+// FIX A: Extract only Domain Model fields.
+// sentBy tags every push so the sender can suppress their own Realtime echo.
 function getCleanSyncState() {
   return {
     turn:        state.turn,
@@ -1456,7 +1453,8 @@ function getCleanSyncState() {
     winTarget:   state.winTarget,
     gameOver:    state.gameOver,
     last_event:  state.last_event ?? null,
-    bet:         state.bet,   // bet MUST sync so rolling player can resolve opponent's bet
+    bet:         state.bet,
+    sentBy:      localId,  // used by Realtime listener to suppress self-echo
     // rolling, trade are intentionally excluded — View Model only
   };
 }
@@ -1499,41 +1497,32 @@ async function pushSyncState(eventPayload = null) {
 async function playbackRender(payloadState) {
   if (!payloadState) return;
   const ev = payloadState.last_event;
-  const prevTurn = state.turn; // remember turn before merge to detect turn change
+  const prevTurn = state.turn;
 
-  // 1. Play animations BEFORE merging (so we animate FROM the old positions)
   if (ev && ev.id !== lastProcessedEventId) {
     lastProcessedEventId = ev.id;
     if (ev.type === 'ROLL') {
-      // Use ev.oldPos so animation starts from BEFORE the move, not after
+      // ev.oldPos = pre-roll position, ev.newPos = destination
+      // Do NOT call mergeServerState here — let animateTokenAlongPath handle position
+      // State.players[ev.p].position at this point is already ev.oldPos on P2 (never echoed to P1)
       await animateDice(ev.dice);
-      // Temporarily set position back to oldPos so animateTokenAlongPath gets the right start
-      if (payloadState.players?.[ev.p]) {
-        const savedPos = payloadState.players[ev.p].position; // = newPos (destination)
-        payloadState.players[ev.p].position = ev.oldPos;      // rewind for animation start
-        // merge now so animateTokenAlongPath reads oldPos
-        mergeServerState(payloadState);
-        await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice);
-        state.players[ev.p].position = savedPos; // restore correct final position
-      }
+      await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis); // passedGenesis=true means genesis bonus was pre-applied
     } else if (ev.type === 'BUY') {
       await animateCoins(ev.p, 'bank', 4);
-      await flashCenterEvent(`${payloadState.players[ev.p].name} bought ${ev.landed.name}!`, ev.landed.image, `$${ev.landed.price}`, 1500);
+      await flashCenterEvent(`${payloadState.players[ev.p]?.name} bought ${ev.landed.name}!`, ev.landed.image, `$${ev.landed.price}`, 1500);
     } else if (ev.type === 'RENT') {
       await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
-      await flashCenterEvent(`${payloadState.players[ev.p].name} paid $${ev.rent} rent`, ev.landed.image, `-$${ev.rent}`, 1500);
+      await flashCenterEvent(`${payloadState.players[ev.p]?.name} paid $${ev.rent} rent`, ev.landed.image, `-$${ev.rent}`, 1500);
     }
   }
 
   mergeServerState(payloadState);
 
-  // Restart timer only when turn actually changed AND it's now our turn
-  // (avoids double-timer: both players running independent countdowns)
-  if (payloadState.turn !== prevTurn) {
+  // Restart timer only when turn changed (detected from payload, not local state which just merged)
+  if (payloadState.turn && payloadState.turn !== prevTurn) {
     startTurnTimer();
-    // Show betting to the waiting player when it's the opponent's turn
     const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
-    if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150 && !state.bet.active) {
+    if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150 && !state.bet?.active) {
       showBettingPanel(waitingPlayer);
     } else {
       hideBettingPanel();
@@ -1649,9 +1638,17 @@ async function init() {
   channel.on('postgres_changes', { 
     event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` 
   }, payload => {
-    // Also track incoming version so we stay in sync with OCC counter
     if (payload.new.version !== undefined) {
       gameVersion = payload.new.version;
+    }
+    // SELF-ECHO SUPPRESSION: ignore Realtime events that we ourselves pushed.
+    // Without this, our own pushSyncState triggers playbackRender which:
+    //   - creates a second floating token (double animation glitch)
+    //   - resets state.rolling=false prematurely (breaks animation guard)
+    //   - starts a duplicate turn timer
+    if (payload.new.state?.sentBy === localId) {
+      console.log('[realtime] suppressed self-echo');
+      return;
     }
     playbackRender(payload.new.state);
   });
