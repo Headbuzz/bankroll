@@ -494,7 +494,7 @@ function getPathIds(fromId, steps) {
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function animateTokenAlongPath(playerId, fromId, steps) {
+async function animateTokenAlongPath(playerId, fromId, steps, skipGenesisBonus = false) {
   const player = state.players[playerId];
   const path = getPathIds(fromId, steps);
   if (!path.length) return;
@@ -511,7 +511,8 @@ async function animateTokenAlongPath(playerId, fromId, steps) {
     const pos = getTileCenter(spaceId);
     if (pos) { token.style.left = pos.x + 'px'; token.style.top = pos.y + 'px'; }
     
-    if (spaceId === 1) {
+    if (spaceId === 1 && !skipGenesisBonus) {
+      // Only add balance if not already handled by the caller
       player.balance += 200; renderHUD();
       flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
       animateCoins('bank', playerId, 5);
@@ -808,28 +809,22 @@ function showBettingPanel(bettorId) {
   const panel = document.getElementById('betting-panel');
   if (!panel) return;
   const opponent = bettorId === 'p1' ? 'p2' : 'p1';
-  const oppPos = state.players[opponent].position;
   const bettor = state.players[bettorId];
 
-  // Fee increased to $150
   if (bettor.balance < 150) { panel.style.display = 'none'; return; }
+  if (state.bet.active) { panel.style.display = 'none'; return; } // already have an active bet
 
-  // Get exactly 6 reachable spaces ahead of the opponent
-  const reachable = getReachableSpaces(oppPos);
-  
-  // Randomly shuffle and pick exactly 2 to offer
-  const shuffled = [...reachable].sort(() => 0.5 - Math.random());
-  const options = shuffled.slice(0, 2);
+  const reachable = getReachableSpaces(state.players[opponent].position);
+  const options = [...reachable].sort(() => 0.5 - Math.random()).slice(0, 2);
 
   let betsHtml = '';
   options.forEach(space => {
-    let icon = space.type === 'city' ? '🏙️' : space.type === 'utility' ? space.icon : '🎯';
+    let icon = space.type === 'city' ? '\uD83C\uDFD9\uFE0F' : space.type === 'utility' ? space.icon : '\uD83C\uDFAF';
     let colorLeft = space.type === 'city' ? TIERS[space.tier].color : '#78909C';
     betsHtml += `<button class="bet-btn" data-bet-type="space" data-bet-value="${space.id}" style="border-left:4px solid ${colorLeft}">
       ${icon} ${space.name} <span class="bet-btn__prob">WIN $300</span></button>`;
   });
 
-  // Position dynamically above the active bettor's HUD
   if (bettorId === 'p1') {
     panel.style.left = '16px'; panel.style.right = 'auto'; panel.style.bottom = '170px';
   } else {
@@ -837,14 +832,14 @@ function showBettingPanel(bettorId) {
   }
 
   panel.innerHTML = `
-    <div class="bet-panel__header">🎯 PREDICT ${state.players[opponent].name.toUpperCase()}'S ROLL</div>
+    <div class="bet-panel__header">\uD83C\uDFAF PREDICT ${state.players[opponent].name.toUpperCase()}'S ROLL</div>
     <div class="bet-panel__cost">Cost: $150 | Win: $300</div>
     <div class="bet-panel__options">${betsHtml}</div>
   `;
   panel.style.display = 'block';
 
   panel.querySelectorAll('.bet-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       if (state.bet.active) return;
       const type = btn.dataset.betType;
       const value = btn.dataset.betValue;
@@ -852,7 +847,9 @@ function showBettingPanel(bettorId) {
       state.bet = { active: true, bettor: bettorId, betType: type, betValue: value };
       renderHUD();
       const targetSpace = BOARD.find(s => String(s.id) === value);
-      panel.innerHTML = `<div class="bet-panel__header">🎯 Bet placed: ${targetSpace ? targetSpace.name : value}</div><div class="bet-panel__cost">Waiting for dice roll...</div>`;
+      panel.innerHTML = `<div class="bet-panel__header">\uD83C\uDFAF Bet placed: ${targetSpace ? targetSpace.name : value}</div><div class="bet-panel__cost">Waiting for dice roll...</div>`;
+      // Sync bet to DB so the rolling player can resolve it
+      await pushSyncState();
     });
   });
 }
@@ -894,6 +891,8 @@ async function resolveBet(diceVal, landedSpace) {
    ============================================== */
 async function onRollClick() {
   if (state.rolling || state.gameOver || state.trade.active) return;
+  // Guard: only current turn player can roll
+  if (state.turn !== localId) return;
   state.rolling = true;
   stopTurnTimer();
   hideBettingPanel();
@@ -903,21 +902,42 @@ async function onRollClick() {
 
   if (player.jailTurns > 0) {
     player.jailTurns--;
-    await flashCenterEvent(`${player.name} is in Jail. ${player.jailTurns > 0 ? player.jailTurns + ' round(s) left.' : 'Released next turn!'}`, 'audit.png', '🔒', 1800);
-    state.rolling = false; switchTurn(); return;
+    await flashCenterEvent(`${player.name} is in Jail. ${player.jailTurns > 0 ? player.jailTurns + ' round(s) left.' : 'Released next turn!'}`, 'audit.png', '\uD83D\uDD12', 1800);
+    state.rolling = false;
+    await pushSyncState(); // sync jail turn used
+    switchTurn();
+    return;
   }
 
   renderHUD();
   const d1 = Math.ceil(Math.random() * 6);
-  pushSyncState({ type: 'ROLL', dice: d1 });
-  await animateDice(d1);
+  const oldPos = player.position; // capture BEFORE animation so remote player can animate from correct spot
 
-  const oldPos = player.position;
+  // Compute new position before animation so it's in DB before P2 gets the event
   let newPos = oldPos + d1;
-  const passedGenesis = newPos > 28;
   if (newPos > 28) newPos -= 28;
+  const passedGenesis = (oldPos + d1) > 28;
 
-  await animateTokenAlongPath(ap, oldPos, d1);
+  // Update local position immediately so state pushed to DB is correct
+  player.position = newPos;
+  if (passedGenesis) {
+    player.balance += 200;
+  }
+
+  // Push ROLL event FIRST (P2 will animate from oldPos to newPos)
+  await pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
+
+  // Local animation (runs in parallel with DB write)
+  await animateDice(d1);
+  await animateTokenAlongPath(ap, oldPos, d1, true); // true = skip genesis bonus (already handled above)
+  if (passedGenesis) {
+    // Already added $200 above, just show the notification
+    renderHUD();
+    flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
+    animateCoins('bank', ap, 5);
+    checkWin();
+  }
+
   resumeTurnTimer();
   const landed = BOARD.find(s => s.id === newPos);
 
@@ -928,27 +948,23 @@ async function onRollClick() {
 
   if (landed && (landed.type === 'city' || landed.type === 'utility')) {
     if (!state.owners[landed.id]) {
-      // Can buy only if balance >= 0
       if (player.balance >= 0 && player.balance >= landed.price) {
         const decision = await showCenterBuyDecision(landed);
         if (decision === 'buy') {
           player.balance -= landed.price;
-          // 100% of purchase price feeds the Staking Pool Instead of the bank
           state.stakingPool += landed.price;
           state.owners[landed.id] = ap;
-          pushSyncState({ type: 'BUY', p: ap, landed });
           updateTileOwnerBand(landed.id, ap);
           renderHUD();
           await animateCoins(ap, 'bank', 4);
           await flashCenterEvent(`${player.name} bought ${landed.name}!`, landed.image, `$${landed.price}`, 1500);
-          // Check monopoly
           if (landed.type === 'city' && hasMonopoly(ap, landed.tier)) {
-            await flashCenterEvent(`🏆 MONOPOLY SECURED — ${TIERS[landed.tier].label}!`, null, 'Rent doubled! You can build!', 2000);
+            await flashCenterEvent(`\uD83C\uDFC6 MONOPOLY SECURED \u2014 ${TIERS[landed.tier].label}!`, null, 'Rent doubled! You can build!', 2000);
           }
           checkWin();
         } else { showCenterIdle(); }
       } else if (player.balance < 0) {
-        await flashCenterEvent(`${player.name} is in debt — can't buy!`, landed.image, null, 1200);
+        await flashCenterEvent(`${player.name} is in debt \u2014 can't buy!`, landed.image, null, 1200);
       } else {
         await flashCenterEvent(`${player.name} can't afford ${landed.name}!`, landed.image, `$${landed.price}`, 1500);
       }
@@ -957,7 +973,6 @@ async function onRollClick() {
       const owner = state.owners[landed.id];
       player.balance -= rentOwed;
       state.players[owner].balance += rentOwed;
-      pushSyncState({ type: 'RENT', p: ap, owner, rent: rentOwed, landed });
       renderHUD();
       await animateCoins(ap, owner, Math.min(Math.ceil(rentOwed / 40), 8));
       await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, landed.image, `-$${rentOwed}`, 1500);
@@ -967,7 +982,8 @@ async function onRollClick() {
   }
 
   state.rolling = false;
-  pushSyncState();
+  state.bet = { active: false, bettor: null, betType: null, betValue: null }; // clear bet after turn
+  await pushSyncState(); // final clean sync with all balance/ownership changes
   switchTurn();
 }
 
@@ -1176,12 +1192,16 @@ function renderPlayerCard(elId, player, playerId) {
 function switchTurn() {
   if (state.gameOver) return;
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
-  pushSyncState();
+  state.bet = { active: false, bettor: null, betType: null, betValue: null }; // reset bet on new turn
+  pushSyncState(); // pushes new turn to DB; P2 will get this via Realtime
   startTurnTimer();
   renderHUD();
-  // Show betting panel for the waiting player
+  hideBettingPanel();
+  // Show betting panel for the waiting player (the one NOT rolling next)
   const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
-  if (state.players[waitingPlayer].balance >= 30) { showBettingPanel(waitingPlayer); }
+  if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150) {
+    showBettingPanel(waitingPlayer);
+  }
 }
 
 
@@ -1423,7 +1443,8 @@ function showChatToast(name, text, senderId) {
    ============================================== */
 
 // FIX A: Extract only Domain Model fields — strip all View Model / ephemeral UI flags.
-// rolling, trade.active, bet.active, trade.timer must NEVER go to the database.
+// rolling, trade.active, trade.timer must NEVER go to the database.
+// bet IS included because the rolling player needs to resolve the waiting player's bet.
 function getCleanSyncState() {
   return {
     turn:        state.turn,
@@ -1435,7 +1456,8 @@ function getCleanSyncState() {
     winTarget:   state.winTarget,
     gameOver:    state.gameOver,
     last_event:  state.last_event ?? null,
-    // rolling, trade, bet are intentionally excluded — View Model only
+    bet:         state.bet,   // bet MUST sync so rolling player can resolve opponent's bet
+    // rolling, trade are intentionally excluded — View Model only
   };
 }
 
@@ -1477,13 +1499,23 @@ async function pushSyncState(eventPayload = null) {
 async function playbackRender(payloadState) {
   if (!payloadState) return;
   const ev = payloadState.last_event;
+  const prevTurn = state.turn; // remember turn before merge to detect turn change
 
   // 1. Play animations BEFORE merging (so we animate FROM the old positions)
   if (ev && ev.id !== lastProcessedEventId) {
     lastProcessedEventId = ev.id;
     if (ev.type === 'ROLL') {
+      // Use ev.oldPos so animation starts from BEFORE the move, not after
       await animateDice(ev.dice);
-      await animateTokenAlongPath(ev.p, state.players[ev.p].position, ev.dice);
+      // Temporarily set position back to oldPos so animateTokenAlongPath gets the right start
+      if (payloadState.players?.[ev.p]) {
+        const savedPos = payloadState.players[ev.p].position; // = newPos (destination)
+        payloadState.players[ev.p].position = ev.oldPos;      // rewind for animation start
+        // merge now so animateTokenAlongPath reads oldPos
+        mergeServerState(payloadState);
+        await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice);
+        state.players[ev.p].position = savedPos; // restore correct final position
+      }
     } else if (ev.type === 'BUY') {
       await animateCoins(ev.p, 'bank', 4);
       await flashCenterEvent(`${payloadState.players[ev.p].name} bought ${ev.landed.name}!`, ev.landed.image, `$${ev.landed.price}`, 1500);
@@ -1493,7 +1525,27 @@ async function playbackRender(payloadState) {
     }
   }
 
-  // 2. Merge ONLY the Domain Model fields from server
+  mergeServerState(payloadState);
+
+  // Restart timer only when turn actually changed AND it's now our turn
+  // (avoids double-timer: both players running independent countdowns)
+  if (payloadState.turn !== prevTurn) {
+    startTurnTimer();
+    // Show betting to the waiting player when it's the opponent's turn
+    const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
+    if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150 && !state.bet.active) {
+      showBettingPanel(waitingPlayer);
+    } else {
+      hideBettingPanel();
+    }
+  }
+
+  renderHUD();
+  syncBoardState();
+}
+
+// Extract the domain field merge so it can be called from both paths above
+function mergeServerState(payloadState) {
   state.turn        = payloadState.turn        ?? state.turn;
   state.phase       = payloadState.phase       ?? state.phase;
   state.owners      = payloadState.owners      ?? state.owners;
@@ -1502,29 +1554,27 @@ async function playbackRender(payloadState) {
   state.winTarget   = payloadState.winTarget   ?? state.winTarget;
   state.gameOver    = payloadState.gameOver    ?? false;
   state.last_event  = payloadState.last_event  ?? null;
+  // Sync bet from server (rolling player needs to see the waiting player's bet)
+  if (payloadState.bet !== undefined) state.bet = payloadState.bet;
 
-  // Merge players but ALWAYS preserve tokenImg and other client-only display fields
-  // because the Edge Function's initial state doesn't include tokenImg
+  // Merge players but ALWAYS preserve tokenImg
   if (payloadState.players) {
     const TOKEN_DEFAULTS = { p1: 'redmarker.png', p2: 'bluemarker.png' };
     for (const slot of ['p1', 'p2']) {
       if (payloadState.players[slot]) {
         state.players[slot] = {
-          ...state.players[slot],                          // keep local display fields
-          ...payloadState.players[slot],                   // overwrite with server truth
-          tokenImg: payloadState.players[slot].tokenImg    // prefer server if set,
-                    || state.players[slot].tokenImg        // else keep local,
-                    || TOKEN_DEFAULTS[slot],               // else hardcoded default
+          ...state.players[slot],
+          ...payloadState.players[slot],
+          tokenImg: payloadState.players[slot].tokenImg
+                    || state.players[slot].tokenImg
+                    || TOKEN_DEFAULTS[slot],
         };
       }
     }
   }
 
-  // 3. Safety net: release any stuck animation lock
+  // Safety net: release any stuck animation lock
   state.rolling = false;
-
-  renderHUD();
-  syncBoardState();
 }
 
 function syncBoardState() {
