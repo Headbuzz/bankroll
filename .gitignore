@@ -1,0 +1,20 @@
+# Git ignore rules for Bankroll project
+# ─────────────────────────────────────────
+
+# Environment secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+
+# Supabase local dev
+.supabase/
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db

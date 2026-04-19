@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BANKROLL — Game Lobby</title>
+  <meta name="description" content="Create or join a Bankroll game room."/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --gold: #D4A853;
+      --gold-light: #F0C96A;
+      --dark: #0A0A0F;
+      --card: rgba(255,255,255,0.04);
+      --card-hover: rgba(255,255,255,0.07);
+      --border: rgba(255,255,255,0.08);
+      --text: #F0EDE6;
+      --muted: rgba(240,237,230,0.5);
+      --p1: #E53935;
+      --p2: #1E88E5;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--dark);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Animated background */
+    .bg-orbs { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+    .orb { position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0.12; animation: orbFloat 14s ease-in-out infinite; }
+    .orb-1 { width: 600px; height: 600px; background: var(--gold); top: -200px; right: -100px; }
+    .orb-2 { width: 500px; height: 500px; background: #1565C0; bottom: -200px; left: -100px; animation-delay: 5s; }
+    @keyframes orbFloat { 0%,100%{transform:translate(0,0)} 50%{transform:translate(15px,-25px)} }
+    .bg-grid { position:fixed;inset:0;z-index:0;pointer-events:none;background-image:radial-gradient(circle,rgba(255,255,255,0.03) 1px,transparent 1px);background-size:36px 36px; }
+
+    /* Nav */
+    .nav {
+      position: relative; z-index: 10;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 20px 40px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(10,10,15,0.8);
+      backdrop-filter: blur(12px);
+    }
+    .nav__logo {
+      font-family: 'DM Serif Display', serif;
+      font-size: 22px;
+      background: linear-gradient(135deg, var(--gold-light), var(--gold));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+      letter-spacing: 2px;
+    }
+    .nav__user {
+      display: flex; align-items: center; gap: 12px;
+    }
+    .nav__avatar {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--gold-light), var(--gold));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 14px; color: #0A0A0F;
+      overflow: hidden;
+    }
+    .nav__avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .nav__name { font-size: 14px; font-weight: 600; }
+    .nav__signout {
+      background: none; border: 1px solid var(--border); color: var(--muted);
+      padding: 7px 14px; border-radius: 8px; font-size: 13px; cursor: pointer;
+      transition: border-color 150ms, color 150ms;
+    }
+    .nav__signout:hover { border-color: rgba(255,255,255,0.2); color: var(--text); }
+
+    /* Main */
+    .main {
+      position: relative; z-index: 5;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 60px 20px;
+      gap: 16px;
+    }
+
+    .lobby-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 42px;
+      background: linear-gradient(135deg, var(--gold-light), var(--gold));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+      letter-spacing: 2px;
+      text-align: center;
+      animation: fadeUp 0.5s ease-out;
+    }
+    .lobby-sub {
+      color: var(--muted);
+      font-size: 15px;
+      text-align: center;
+      margin-bottom: 20px;
+      animation: fadeUp 0.5s ease-out 0.1s both;
+    }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+
+    /* Cards row */
+    .cards {
+      display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;
+      animation: fadeUp 0.5s ease-out 0.2s both;
+    }
+
+    .action-card {
+      background: var(--card);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 36px 32px;
+      width: 300px;
+      display: flex; flex-direction: column; align-items: center; gap: 16px;
+      transition: background 200ms, border-color 200ms, transform 200ms;
+      cursor: default;
+    }
+    .action-card:hover { background: var(--card-hover); border-color: rgba(255,255,255,0.14); }
+
+    .card-icon {
+      width: 64px; height: 64px;
+      background: rgba(212,168,83,0.12);
+      border: 1px solid rgba(212,168,83,0.2);
+      border-radius: 16px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px;
+    }
+    .card-title {
+      font-family: 'DM Serif Display', serif;
+      font-size: 22px;
+      color: var(--text);
+    }
+    .card-desc {
+      font-size: 13px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    /* Input */
+    .room-input {
+      width: 100%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 13px 16px;
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 4px;
+      text-align: center;
+      text-transform: uppercase;
+      outline: none;
+      transition: border-color 200ms;
+    }
+    .room-input:focus { border-color: var(--gold); }
+    .room-input::placeholder { color: rgba(240,237,230,0.2); letter-spacing: 2px; font-weight: 400; font-size: 14px; }
+
+    /* Buttons */
+    .btn-gold {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, var(--gold-light), var(--gold));
+      border: none; border-radius: 12px;
+      color: #0A0A0F;
+      font-family: 'Inter', sans-serif;
+      font-size: 14px; font-weight: 700;
+      cursor: pointer;
+      transition: opacity 200ms, transform 150ms;
+      box-shadow: 0 4px 20px rgba(212,168,83,0.25);
+      letter-spacing: 0.5px;
+    }
+    .btn-gold:hover { opacity: 0.9; transform: translateY(-1px); }
+    .btn-gold:active { transform: translateY(0); }
+    .btn-gold:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .btn-outline {
+      width: 100%;
+      padding: 14px;
+      background: transparent;
+      border: 1px solid var(--border); border-radius: 12px;
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer;
+      transition: background 200ms, border-color 200ms;
+      letter-spacing: 0.5px;
+    }
+    .btn-outline:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.16); }
+
+    /* Room code display */
+    .room-code-display {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      padding: 20px;
+      background: rgba(212,168,83,0.08);
+      border: 1px solid rgba(212,168,83,0.2);
+      border-radius: 14px;
+      animation: fadeUp 0.3s ease-out;
+    }
+    .room-code-display.visible { display: flex; }
+    .room-code-display__label { font-size: 12px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+    .room-code-display__code {
+      font-family: 'DM Serif Display', serif;
+      font-size: 36px;
+      letter-spacing: 8px;
+      color: var(--gold-light);
+    }
+    .room-code-display__hint { font-size: 12px; color: var(--muted); text-align: center; }
+
+    /* Waiting */
+    .waiting-dots span {
+      display: inline-block;
+      animation: dot 1.2s infinite;
+      font-size: 20px;
+    }
+    .waiting-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .waiting-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dot { 0%,80%,100%{opacity:0.2;transform:scale(0.8)} 40%{opacity:1;transform:scale(1)} }
+
+    /* Status */
+    .status-msg {
+      font-size: 13px; padding: 10px 14px; border-radius: 8px;
+      width: 100%; text-align: center; display: none;
+    }
+    .status-msg.error { display:block; background:rgba(255,82,82,0.1); border:1px solid rgba(255,82,82,0.2); color:#FF5252; }
+    .status-msg.success { display:block; background:rgba(76,175,80,0.1); border:1px solid rgba(76,175,80,0.2); color:#4CAF50; }
+
+    /* Spinner */
+    .spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(10,10,15,0.3); border-top-color:#0A0A0F; border-radius:50%; animation:spin 0.6s linear infinite; vertical-align:middle; margin-right:6px; }
+    @keyframes spin { to{transform:rotate(360deg)} }
+  </style>
+</head>
+<body>
+  <div class="bg-orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div></div>
+  <div class="bg-grid"></div>
+
+  <nav class="nav">
+    <div class="nav__logo">🏦 BANKROLL</div>
+    <div class="nav__user">
+      <div class="nav__avatar" id="nav-avatar">?</div>
+      <span class="nav__name" id="nav-name">Loading...</span>
+      <button class="nav__signout" onclick="signOut()">Sign Out</button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <h1 class="lobby-title">Game Lobby</h1>
+    <p class="lobby-sub">Create a private game room or join a friend's match</p>
+
+    <div class="cards">
+      <!-- Create Room -->
+      <div class="action-card" id="card-create">
+        <div class="card-icon">🎲</div>
+        <div class="card-title">Create Room</div>
+        <div class="card-desc">Start a new private game. Share the room code with your opponent.</div>
+
+        <!-- Before creating -->
+        <div id="create-pre" style="width:100%;display:flex;flex-direction:column;gap:10px">
+          <button class="btn-gold" id="btn-create" onclick="createRoom()">Create Game Room</button>
+        </div>
+
+        <!-- Room code display (after creation) -->
+        <div class="room-code-display" id="room-code-display">
+          <div class="room-code-display__label">Your Room Code</div>
+          <div class="room-code-display__code" id="room-code-text">------</div>
+          <div class="room-code-display__hint">Share this with your opponent · Waiting for them to join<br>
+            <span class="waiting-dots"><span>●</span><span>●</span><span>●</span></span>
+          </div>
+          <button class="btn-outline" onclick="copyRoomCode()" style="margin-top:4px">📋 Copy Code</button>
+        </div>
+
+        <div class="status-msg" id="create-status"></div>
+      </div>
+
+      <!-- Join Room -->
+      <div class="action-card" id="card-join">
+        <div class="card-icon">🔑</div>
+        <div class="card-title">Join Room</div>
+        <div class="card-desc">Enter the 6-character code from your opponent to join their game.</div>
+
+        <input
+          class="room-input"
+          id="join-code-input"
+          type="text"
+          maxlength="6"
+          placeholder="XXXXXX"
+          oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')"
+        />
+        <button class="btn-gold" id="btn-join" onclick="joinRoom()">Join Game</button>
+        <div class="status-msg" id="join-status"></div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+
+    const SUPABASE_URL  = 'https://kwcaksexrlgmuxredbcc.supabase.co';
+    const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt3Y2Frc2V4cmxnbXV4cmVkYmNjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY1NjA4MzgsImV4cCI6MjA5MjEzNjgzOH0.vsExdNZrc-R0eEINJQRvV5JG0I9BGRLqa51SEF-aELg';
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+    let currentUser = null;
+    let currentSession = null;
+    let createdRoomCode = null;
+    let realtimeSubscription = null;
+
+    // ── Auth Guard ─────────────────────────────────────────
+    // Always use getSession() + listen for onAuthStateChange to handle
+    // OAuth callback hash fragments (#access_token=...) from login redirects
+    supabase.auth.onAuthStateChange((event, session) => {
+      console.log('[auth] event:', event, 'session:', session?.user?.email);
+      if (session) {
+        currentSession = session;
+        currentUser = session.user;
+        loadUserProfile();
+      } else if (event === 'SIGNED_OUT') {
+        window.location.href = 'login.html';
+      }
+    });
+
+    const { data: { session: initialSession } } = await supabase.auth.getSession();
+    console.log('[auth] initial session:', initialSession?.user?.email ?? 'none');
+    if (!initialSession) {
+      window.location.href = 'login.html';
+    } else {
+      currentSession = initialSession;
+      currentUser = initialSession.user;
+      loadUserProfile();
+    }
+
+    // ── Helper: get a fresh valid token before every function call ──
+    async function getFreshToken() {
+      const { data: { session }, error } = await supabase.auth.getSession();
+      if (error || !session) {
+        window.location.href = 'login.html';
+        throw new Error('Session expired — please log in again');
+      }
+      currentSession = session;
+      return session.access_token;
+    }
+
+    // ── Helper: call an edge function with explicit auth ──
+    async function callFunction(body) {
+      const token = await getFreshToken();
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/game_action`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'apikey': SUPABASE_ANON,
+        },
+        body: JSON.stringify(body),
+      });
+      const json = await resp.json();
+      console.log(`[${body.action}] status:${resp.status} body:`, json);
+      if (!resp.ok) throw new Error(json.error || json.detail || json.message || `HTTP ${resp.status}`);
+      return json;
+    }
+
+    async function loadUserProfile() {
+      // Try to load from profiles table; fall back to auth user info
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', currentUser.id)
+        .maybeSingle();
+
+      const name = profile?.display_name
+        || currentUser.user_metadata?.full_name
+        || currentUser.email?.split('@')[0]
+        || 'Player';
+
+      document.getElementById('nav-name').textContent = name;
+
+      const avatar = document.getElementById('nav-avatar');
+      const avatarUrl = profile?.avatar_url || currentUser.user_metadata?.avatar_url;
+      if (avatarUrl) {
+        avatar.innerHTML = `<img src="${avatarUrl}" alt="${name}"/>`;
+      } else {
+        avatar.textContent = name.charAt(0).toUpperCase();
+      }
+    }
+
+    // ── Create Room ────────────────────────────────────────
+    window.createRoom = async function() {
+      const btn = document.getElementById('btn-create');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Creating...';
+      setStatus('create', '', '');
+
+      try {
+        const data = await callFunction({ action: 'create_room' });
+        if (!data?.room_code) throw new Error('No room code returned from server');
+
+        createdRoomCode = data.room_code;
+        document.getElementById('create-pre').style.display = 'none';
+        document.getElementById('room-code-text').textContent = createdRoomCode;
+        document.getElementById('room-code-display').classList.add('visible');
+        listenForOpponent(createdRoomCode);
+
+      } catch (err) {
+        setStatus('create', err.message, 'error');
+        btn.disabled = false;
+        btn.innerHTML = 'Create Game Room';
+      }
+    };
+
+    function listenForOpponent(roomCode) {
+      if (realtimeSubscription) realtimeSubscription.unsubscribe();
+
+      // Primary: Realtime postgres_changes (instant, requires Realtime enabled on games table)
+      realtimeSubscription = supabase
+        .channel(`lobby:${roomCode}`, {
+          config: { presence: { key: currentUser.id } }
+        })
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'games',
+          filter: `room_code=eq.${roomCode}`
+        }, (payload) => {
+          console.log('[realtime] game update:', payload.new.status);
+          if (payload.new.status === 'active') {
+            goToGame(roomCode, 'p1');
+          }
+        })
+        .subscribe((status) => {
+          console.log('[realtime] subscription status:', status);
+        });
+
+      // Fallback: poll every 3 seconds in case Realtime isn't configured
+      const pollInterval = setInterval(async () => {
+        try {
+          const resp = await fetch(
+            `${SUPABASE_URL}/rest/v1/games?room_code=eq.${roomCode}&select=status,state`,
+            {
+              headers: {
+                'Authorization': `Bearer ${currentSession.access_token}`,
+                'apikey': SUPABASE_ANON,
+              }
+            }
+          );
+          const rows = await resp.json();
+          if (rows?.[0]?.status === 'active') {
+            clearInterval(pollInterval);
+            goToGame(roomCode, 'p1');
+          }
+        } catch (e) { /* ignore poll errors */ }
+      }, 3000);
+
+      // Store interval so we can clear it on navigation
+      window._lobbyPollInterval = pollInterval;
+    }
+
+    function goToGame(roomCode, slot) {
+      if (window._lobbyPollInterval) clearInterval(window._lobbyPollInterval);
+      if (realtimeSubscription) realtimeSubscription.unsubscribe();
+      sessionStorage.setItem('bankroll_room', roomCode);
+      sessionStorage.setItem('bankroll_slot', slot);
+      window.location.href = `index.html?room=${roomCode}&slot=${slot}`;
+    }
+
+
+    // ── Join Room ──────────────────────────────────────────
+    window.joinRoom = async function() {
+      const code = document.getElementById('join-code-input').value.trim().toUpperCase();
+      if (code.length !== 6) return setStatus('join', 'Please enter a 6-character room code.', 'error');
+
+      const btn = document.getElementById('btn-join');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Joining...';
+      setStatus('join', '', '');
+
+      try {
+        const data = await callFunction({ action: 'join_room', room_code: code });
+        goToGame(code, 'p2');
+
+
+      } catch (err) {
+        setStatus('join', err.message, 'error');
+        btn.disabled = false;
+        btn.innerHTML = 'Join Game';
+      }
+    };
+
+    // ── Utilities ──────────────────────────────────────────
+    window.copyRoomCode = function() {
+      if (!createdRoomCode) return;
+      navigator.clipboard.writeText(createdRoomCode).then(() => {
+        setStatus('create', '✅ Code copied to clipboard!', 'success');
+        setTimeout(() => setStatus('create','',''), 2000);
+      });
+    };
+
+    window.signOut = async function() {
+      await supabase.auth.signOut();
+      window.location.href = 'login.html';
+    };
+
+    function setStatus(card, msg, type) {
+      const el = document.getElementById(`${card}-status`);
+      el.textContent = msg;
+      el.className = `status-msg ${type}`;
+    }
+
+    // Enter key on join input
+    document.getElementById('join-code-input')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') window.joinRoom();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BANKROLL — Game Board</title>
+  <meta name="description" content="BANKROLL — A premium Web3 real estate board game."/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <link href="css/styles.css?v=16" rel="stylesheet"/>
+</head>
+<body>
+
+  <!-- Notifications -->
+  <div id="chat-toast" class="chat-toast"></div>
+  
+  <!-- ═══ Chat Widget ═══ -->
+  <div class="chat-widget">
+    <button id="btn-chat-toggle" class="chat-btn">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+      <div id="chat-badge" class="chat-badge" style="display:none"></div>
+    </button>
+    <div id="chat-dropdown" class="chat-dropdown">
+      <div id="chat-log" class="chat-log"></div>
+      <div class="chat-input-wrap">
+        <input type="text" id="chat-input" class="chat-input-field" placeholder="Say hello..." autocomplete="off"/>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Player Cards ═══ -->
+  <div id="player1-hud" class="hud-player hud-player--left"></div>
+  <div id="player2-hud" class="hud-player hud-player--right"></div>
+
+  <!-- ═══ Betting Panel (slides under player card) ═══ -->
+  <div id="betting-panel" class="betting-panel" style="display:none"></div>
+
+  <!-- ═══ GAME BOARD ═══ -->
+  <div id="board-wrapper" class="board-wrapper">
+    <div id="board-grid" class="board-grid">
+      <div class="board-center">
+        <div id="center-idle" class="center-idle">
+          <img src="../centralpool.png" alt="Staking Pool" class="center-idle__icon"/>
+          <span class="center-idle__label">STAKING POOL</span>
+          <span id="center-amount" class="center-idle__amount">$0</span>
+        </div>
+        <div id="center-event" class="center-event" style="display:none">
+          <span id="center-event-text" class="center-event__text"></span>
+          <img id="center-event-image" class="center-event__image" src="" alt=""/>
+          <div id="center-event-price" class="center-event__price"></div>
+          <div id="center-event-actions" class="center-event__actions"></div>
+        </div>
+        <div id="dice-tray" class="dice-tray">
+          <div class="die" id="die-1"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Trade Modal Overlay ═══ -->
+  <div id="trade-overlay" class="overlay" aria-hidden="true">
+    <div class="overlay__backdrop"></div>
+    <div id="trade-panel" class="trade-panel"></div>
+  </div>
+
+  <!-- ═══ Token Layer ═══ -->
+  <div id="token-layer"></div>
+
+  <!-- ═══ Hover Tooltip ═══ -->
+  <div id="tile-tooltip" class="tooltip" aria-hidden="true">
+    <div class="tooltip__accent"></div>
+    <div class="tooltip__body">
+      <span class="tooltip__name"></span>
+      <span class="tooltip__tier"></span>
+      <div class="tooltip__info">
+        <span class="tooltip__price"></span>
+        <span class="tooltip__rent"></span>
+      </div>
+      <span class="tooltip__owner"></span>
+    </div>
+  </div>
+
+  <!-- ═══ Property Card Overlay ═══ -->
+  <div id="property-overlay" class="overlay" aria-hidden="true">
+    <div class="overlay__backdrop"></div>
+    <div class="property-card">
+      <div class="property-card__hero">
+        <img class="property-card__image" src="" alt=""/>
+        <button class="property-card__sell-btn" id="btn-sell-card" style="display:none;">SELL (80%)</button>
+        <div class="property-card__gradient"></div>
+      </div>
+      <div class="property-card__body">
+        <h2 class="property-card__name"></h2>
+        <span class="property-card__tier"></span>
+        <div class="property-card__price-box">
+          <span class="property-card__price-label">Buy Price</span>
+          <span class="property-card__price-value"></span>
+        </div>
+        <div class="property-card__rent-table"></div>
+        <span class="property-card__building-cost"></span>
+        <div class="property-card__actions">
+          <button class="btn btn--primary btn--card" id="btn-buy">BUY</button>
+          <button class="btn btn--build btn--card" id="btn-build-card" style="display:none;">BUILD</button>
+          <button class="btn btn--secondary btn--card" id="btn-pass">CLOSE</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Victory Overlay ═══ -->
+  <div id="victory-overlay" class="victory-overlay">
+    <div class="victory__content">
+      <div class="victory__trophy">🏆</div>
+      <h1 class="victory__title">VICTORY</h1>
+      <p class="victory__name"></p>
+      <p class="victory__nw-label">Final Net Worth</p>
+      <p class="victory__nw"></p>
+      <button class="btn btn--primary" onclick="location.reload()">PLAY AGAIN</button>
+    </div>
+  </div>
+
+  <script src="js/app.js?v=16"></script>
+</body>
+</html>
