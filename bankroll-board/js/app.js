@@ -1013,9 +1013,16 @@ async function onRollClick() {
   const ap = state.turn;
   const player = state.players[ap];
 
+  try {
+
   if (player.jailTurns > 0) {
-    // Fix 6: Broadcast ghost turn so P2 sees the jailed player's turn appear for 2s
+    // Broadcast ghost turn so P2 sees the jailed player's turn appear briefly
     pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: player.jailTurns });
+
+    // CRITICAL: Re-start the timer so handleTurnTimeout fires and auto-resolves the
+    // decision if the player is AFK. Without this, stopTurnTimer() above makes the
+    // decision wait forever with no escape hatch.
+    resumeTurnTimer();
 
     // Offer the jailed player a choice: PAY $150 to exit, or serve their turn
     const decision = await showCenterDecision(
@@ -1026,6 +1033,8 @@ async function onRollClick() {
         { id: 'jail-stay', label: 'SERVE TURN', cls: 'btn--pass-center', value: 'stay' }
       ]
     );
+    stopTurnTimer(); // stop again after decision resolved — prevents double timeout
+
     if (decision === 'pay' && player.balance >= 150) {
       player.balance -= 150;
       state.stakingPool += Math.round(150 * 0.3);
@@ -1133,7 +1142,14 @@ async function onRollClick() {
   // Fix 12: resolve bet AFTER buy/rent so notifications don't overwrite each other
   await resolveBet(d1, landed);
 
-  state.rolling = false;
+  } catch (e) {
+    console.error('[onRollClick] Unhandled error — recovering:', e);
+  } finally {
+    // ALWAYS reset rolling — even if an async step threw an error.
+    // Without this guard the roll button permanently disappears on any exception.
+    state.rolling = false;
+  }
+
   switchTurn(finalEvent); // fire-and-forget internally
 }
 
@@ -1179,16 +1195,27 @@ function onTileClick(space) {
   showPropertyCard(space);
 }
 
+// Monotonically increasing counter — prevents stale rAF callbacks from an old
+// showPropertyCard call overwriting content from a newer call (image race condition)
+let _cardSeq = 0;
+
 function showPropertyCard(space) {
   if (!overlayEl || !cardEl) return;
   hideTooltip();
+  const mySeq = ++_cardSeq;
+  // Always clear the image immediately so no old image bleeds through
+  cardEl.querySelector('.property-card__image').src = '';
   // If overlay is already open, hide it first and wait 2 paint frames before
-  // populating new data — prevents the old card from flashing through during CSS transition
+  // populating new data — prevents the old card content from flashing
   if (overlayEl.classList.contains('overlay--active')) {
     overlayEl.classList.remove('overlay--active');
-    requestAnimationFrame(() => requestAnimationFrame(() => _populateAndShowCard(space)));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (mySeq !== _cardSeq) return; // A newer showPropertyCard was called — skip
+      _populateAndShowCard(space);
+    }));
     return;
   }
+  if (mySeq !== _cardSeq) return; // Discarded by a newer call
   _populateAndShowCard(space);
 }
 
@@ -1899,9 +1926,10 @@ function mergeServerState(payloadState) {
     }
   }
 
-  // NEVER reset state.rolling here — if localId is mid-roll, this would unlock a second roll.
-  // state.rolling is managed exclusively by onRollClick and the roll completion path.
-  if (localId !== state.turn) state.rolling = false; // only safe to reset for remote player
+  // NEVER reset state.rolling here for the ACTIVE player — mid-roll state must be preserved.
+  // Only safe to reset rolling for the remote/waiting player.
+  // Use payloadState.turn (the INCOMING turn) NOT the local state.turn which is already mutated.
+  if (payloadState.turn && payloadState.turn !== localId) state.rolling = false;
 }
 
 function syncBoardState() {
@@ -1931,6 +1959,10 @@ async function init() {
   setupChat();
   resizeBoard();
   window.addEventListener('resize', resizeBoard);
+  // Preload all board tile images so the property card shows instantly on first click
+  requestIdleCallback(() => {
+    BOARD.forEach(space => { if (space.image) { const i = new Image(); i.src = IMG + space.image; } });
+  }, { timeout: 3000 });
 
   if (!roomCode) {
     console.warn('[init] No room code — redirecting to lobby');
