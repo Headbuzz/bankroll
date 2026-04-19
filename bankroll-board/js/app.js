@@ -1494,18 +1494,33 @@ async function playbackRender(payloadState) {
   }
 
   // 2. Merge ONLY the Domain Model fields from server
-  state.turn        = payloadState.turn;
-  state.phase       = payloadState.phase;
-  state.players     = payloadState.players;
-  state.owners      = payloadState.owners;
-  state.buildings   = payloadState.buildings;
+  state.turn        = payloadState.turn        ?? state.turn;
+  state.phase       = payloadState.phase       ?? state.phase;
+  state.owners      = payloadState.owners      ?? state.owners;
+  state.buildings   = payloadState.buildings   ?? state.buildings;
   state.stakingPool = payloadState.stakingPool ?? state.stakingPool;
   state.winTarget   = payloadState.winTarget   ?? state.winTarget;
-  state.gameOver    = payloadState.gameOver     ?? false;
-  state.last_event  = payloadState.last_event   ?? null;
-  // state.rolling, state.trade, state.bet are deliberately NOT taken from server
+  state.gameOver    = payloadState.gameOver    ?? false;
+  state.last_event  = payloadState.last_event  ?? null;
 
-  // 3. Safety net: if we receive state during an animation lock, release it
+  // Merge players but ALWAYS preserve tokenImg and other client-only display fields
+  // because the Edge Function's initial state doesn't include tokenImg
+  if (payloadState.players) {
+    const TOKEN_DEFAULTS = { p1: 'redmarker.png', p2: 'bluemarker.png' };
+    for (const slot of ['p1', 'p2']) {
+      if (payloadState.players[slot]) {
+        state.players[slot] = {
+          ...state.players[slot],                          // keep local display fields
+          ...payloadState.players[slot],                   // overwrite with server truth
+          tokenImg: payloadState.players[slot].tokenImg    // prefer server if set,
+                    || state.players[slot].tokenImg        // else keep local,
+                    || TOKEN_DEFAULTS[slot],               // else hardcoded default
+        };
+      }
+    }
+  }
+
+  // 3. Safety net: release any stuck animation lock
   state.rolling = false;
 
   renderHUD();
@@ -1540,12 +1555,17 @@ async function init() {
   window.addEventListener('resize', resizeBoard);
 
   if (!roomCode) {
-    console.error("No room code found!");
+    console.warn('[init] No room code — redirecting to lobby');
+    window.location.href = 'lobby.html';
     return;
   }
 
   const currentUser = await getUser();
-  if (!currentUser) return;
+  if (!currentUser) {
+    console.warn('[init] Not logged in — redirecting to login');
+    window.location.href = 'login.html';
+    return;
+  }
 
   const { data: gameData } = await supabase.from('games').select('*').eq('room_code', roomCode).single();
   if (!gameData) return;
@@ -1565,7 +1585,11 @@ async function init() {
 
   // Initial Sync — use FIX E merge logic
   if (gameData.state) {
-    playbackRender(gameData.state);
+    await playbackRender(gameData.state);
+  } else {
+    // No state in DB yet — render the default local state so board isn't blank
+    renderHUD();
+    syncBoardState();
   }
   startTurnTimer();
 

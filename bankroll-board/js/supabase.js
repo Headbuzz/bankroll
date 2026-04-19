@@ -46,3 +46,7 @@ export async function signOut() {
   await supabase.auth.signOut();
   window.location.href = '/bankroll-board/login.html';
 }
+
+// Ensure global objects for non-module scripts like app.js
+window.supabase = supabase;
+window.getUser = getUser;

@@ -121,15 +121,15 @@ Deno.serve(async (req: Request) => {
         turn: 'p1',
         phase: 'idle',
         players: {
-          p1: { name: displayName, balance: 1000, position: 1, jailTurns: 0 },
-          p2: { name: 'Waiting...', balance: 1000, position: 1, jailTurns: 0 },
+          p1: { name: displayName, balance: 1000, position: 1, jailTurns: 0, tokenImg: 'redmarker.png' },
+          p2: { name: 'Waiting...', balance: 1000, position: 1, jailTurns: 0, tokenImg: 'bluemarker.png' },
         },
         owners: {},
         buildings: {},
         stakingPool: 0,
         winTarget: 2500,
         gameOver: false,
-        lastDice: null,
+        last_event: null,
       };
 
       // Generate a unique room code (retry on collision)
@@ -180,7 +180,7 @@ Deno.serve(async (req: Request) => {
         ...game.state,
         players: {
           ...game.state.players,
-          p2: { ...game.state.players.p2, name: p2Name },
+          p2: { ...game.state.players.p2, name: p2Name, tokenImg: 'bluemarker.png' },
         },
       };
 
@@ -264,11 +264,21 @@ Deno.serve(async (req: Request) => {
     if (action === 'state_sync') {
       const { new_state, client_version } = body as any;
 
-      if (typeof client_version !== 'number') {
-        return json({ error: 'client_version is required' }, 400);
+      // Check if version column exists (backward-compatible — works before migration)
+      const hasVersionColumn = game.version !== undefined;
+
+      if (!hasVersionColumn || typeof client_version !== 'number') {
+        // Fallback: simple update (no OCC) — safe until 005_occ_version.sql is run
+        const { error: err } = await db
+          .from('games')
+          .update({ state: new_state })
+          .eq('room_code', room_code);
+        if (err) throw new Error(err.message);
+        console.log('[state_sync] simple update (no OCC — version column missing or client_version not sent)');
+        return json({ ok: true, version: 0 });
       }
 
-      // Atomic conditional update: only succeeds if version hasn't changed
+      // OCC: Atomic conditional update — only succeeds if version hasn't changed
       const { data, error: err } = await db
         .from('games')
         .update({ state: new_state, version: game.version + 1 })
