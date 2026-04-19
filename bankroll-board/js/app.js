@@ -967,7 +967,7 @@ async function resolveBet(diceVal, landedSpace) {
   const b = state.bet;
   const bettor = state.players[b.bettor];
 
-  // Fix 10: Corner landing = auto-lose. Previously returned early without clearing state.bet.
+  // Corner landing = auto-lose — clear bet state so it never lingers
   if (!landedSpace || landedSpace.type === 'corner') {
     const poolShare = Math.round(150 * 0.3);
     state.stakingPool += poolShare;
@@ -978,9 +978,7 @@ async function resolveBet(diceVal, landedSpace) {
   }
 
   let won = false;
-  if (b.betType === 'space' && String(landedSpace.id) === String(b.betValue)) {
-    won = true;
-  }
+  if (b.betType === 'space' && String(landedSpace.id) === String(b.betValue)) won = true;
 
   if (won) {
     const payout = 300;
@@ -989,7 +987,7 @@ async function resolveBet(diceVal, landedSpace) {
     await flashCenterEvent(`${bettor.name} won the prediction bet!`, null, `+$${payout}`, 1500);
     await animateCoins('bank', b.bettor, 6);
   } else {
-    const poolShare = Math.round(150 * 0.3); // 30% to staking pool, 70% removed (intentional)
+    const poolShare = Math.round(150 * 0.3); // 30% to pool, 70% removed (intentional economy burn)
     state.stakingPool += poolShare;
     renderHUD();
     await flashCenterEvent(`${bettor.name} lost the bet. $${poolShare} \u2192 Pool`, null, '-$150', 1200);
@@ -1001,156 +999,149 @@ async function resolveBet(diceVal, landedSpace) {
 
 /* ══════════════════════════════════════════════
    MAIN ROLL
-   ============================================== */
+   ══════════════════════════════════════════════ */
 async function onRollClick() {
   if (state.rolling || state.gameOver || state.trade.active) return;
-  if (state.turn !== localId) return; // only active player rolls
+  if (state.turn !== localId) return;
   state.rolling = true;
   stopTurnTimer();
   hideBettingPanel();
-  showCenterIdle(); // Clear any persistent notification from the previous turn
+  showCenterIdle();
 
   const ap = state.turn;
   const player = state.players[ap];
 
-  try {
-
-  if (player.jailTurns > 0) {
-    // Broadcast ghost turn so P2 sees the jailed player's turn appear briefly
-    pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: player.jailTurns });
-
-    // CRITICAL: Re-start the timer so handleTurnTimeout fires and auto-resolves the
-    // decision if the player is AFK. Without this, stopTurnTimer() above makes the
-    // decision wait forever with no escape hatch.
-    resumeTurnTimer();
-
-    // Offer the jailed player a choice: PAY $150 to exit, or serve their turn
-    const decision = await showCenterDecision(
-      `\uD83D\uDD12 You are in Jail! ${player.jailTurns} turn(s) remaining. Pay $150 now to escape?`,
-      'jail.png',
-      [
-        { id: 'jail-pay', label: 'PAY $150 \u2014 EXIT NOW', cls: 'btn--buy-center', value: 'pay' },
-        { id: 'jail-stay', label: 'SERVE TURN', cls: 'btn--pass-center', value: 'stay' }
-      ]
-    );
-    stopTurnTimer(); // stop again after decision resolved — prevents double timeout
-
-    if (decision === 'pay' && player.balance >= 150) {
-      player.balance -= 150;
-      state.stakingPool += Math.round(150 * 0.3);
-      player.jailTurns = 0;
-      renderHUD();
-      await animateCoins(ap, 'bank', 3);
-      await flashCenterEvent(`${player.name} paid $150 and is free!`, 'jail.png', '-$150', 1500);
-      pushSyncState({ type: 'JAIL_EXIT', p: ap });
-    } else {
-      // Can't afford or chose to stay — decrement the counter and show message
-      player.jailTurns--;
-      await flashCenterEvent(
-        `${player.name} serves their sentence. ${player.jailTurns > 0 ? player.jailTurns + ' turn(s) left.' : 'Released next turn!'}`,
-        'jail.png', '\uD83D\uDD12', 1800
-      );
-    }
-    state.rolling = false;
-    switchTurn(null);
-    return;
-  }
-
-  const d1 = Math.ceil(Math.random() * 6);
-  const oldPos = player.position;
-  let newPos = oldPos + d1;
-  const passedGenesis = (oldPos + d1) > 28;
-  if (newPos > 28) newPos -= 28;
-
-  // Pre-apply final state so DB push is authoritative immediately
-  player.position = newPos;
-  if (passedGenesis) player.balance += 200;
-
-  // Lock the token NOW (before dice animation starts) so that any Postgres event that arrives
-  // during the dice animation cannot place a static token at the destination.
-  animatingTokens.add(ap);
-
-  // ROLL event: broadcast via fast channel (P2 animates in <200ms),
-  // and persist to DB in background (no await = P1 animates immediately)
-  pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
-
-  // P1's local animations start immediately (no waiting for server)
-  await animateDice(d1);
-  await animateTokenAlongPath(ap, oldPos, d1, true); // animateToken re-adds lock internally (idempotent Set)
-  if (passedGenesis) {
-    renderHUD();
-    // MUST be awaited — otherwise the $200 flash timer fires during the buy decision and clears it!
-    await flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
-    animateCoins('bank', ap, 5);
-    checkWin();
-  } else {
-    renderHUD();
-  }
-
-  // AFK guard: reset strike counter since we actually rolled
-  if (state.afk) state.afk[ap] = 0;
-
-  resumeTurnTimer();
-  const landed = BOARD.find(s => s.id === newPos);
-  // resolveBet moved below buy/rent block (Fix 12) so bet notification doesn't overwrite buy/rent
-
+  // HOIST finalEvent BEFORE try — declaring inside try makes it out-of-scope at
+  // switchTurn(finalEvent). That single scoping bug caused every "turn stuck" report.
   let finalEvent = null;
 
-  if (landed?.type === 'corner') { await handleCorner(landed, ap); }
+  try {
+    /* ── JAIL PATH ───────────────────────────────────────────────── */
+    if (player.jailTurns > 0) {
+      pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: player.jailTurns });
 
-  if (landed && (landed.type === 'city' || landed.type === 'utility')) {
-    if (!state.owners[landed.id]) {
-      if (player.balance >= 0 && player.balance >= landed.price) {
-        const decision = await showCenterBuyDecision(landed);
-        if (decision === 'buy') {
-          player.balance -= landed.price;
-          const poolContrib = Math.round(landed.price * 0.3);
-          state.stakingPool += poolContrib;
-          state.owners[landed.id] = ap;
-          updateTileOwnerBand(landed.id, ap);
-          renderHUD();
-          await animateCoins(ap, 'bank', 4);
-          // Show rent value after purchase (not the price)
-          const newRent = calculateRent(landed);
-          await flashCenterEvent(`${player.name} bought ${landed.name}!`, landed.image, `Rent: $${newRent}`, 1800);
-          if (landed.type === 'city' && hasMonopoly(ap, landed.tier)) {
-            await flashCenterEvent('\uD83C\uDFC6 MONOPOLY SECURED!', null, 'Rent doubled! You can build!', 2000);
-          }
-          checkWin();
-          finalEvent = { type: 'BUY', p: ap, landed, newRent };
-        } else { showCenterIdle(); }
-      } else if (player.balance < 0) {
-        await flashCenterEvent(`${player.name} is in debt — can't buy!`, null, null, 1200);
+      // Re-start timer: stopTurnTimer() above killed it. Without resumeTurnTimer()
+      // showCenterDecision waits forever if the player is AFK.
+      resumeTurnTimer();
+
+      const decision = await showCenterDecision(
+        `\uD83D\uDD12 You are in Jail! ${player.jailTurns} turn(s) remaining. Pay $150 to escape?`,
+        'jail.png',
+        [
+          { id: 'jail-pay', label: 'PAY $150 \u2014 EXIT NOW', cls: 'btn--buy-center', value: 'pay' },
+          { id: 'jail-stay', label: 'SERVE TURN', cls: 'btn--pass-center', value: 'stay' }
+        ]
+      );
+      stopTurnTimer();
+
+      if (decision === 'pay' && player.balance >= 150) {
+        player.balance -= 150;
+        state.stakingPool += Math.round(150 * 0.3);
+        player.jailTurns = 0;
+        renderHUD();
+        await animateCoins(ap, 'bank', 3);
+        await flashCenterEvent(`${player.name} paid $150 and is free!`, 'jail.png', '-$150', 1500);
+        pushSyncState({ type: 'JAIL_EXIT', p: ap });
       } else {
-        await flashCenterEvent(`${player.name} can't afford ${landed.name}!`, null, `$${landed.price}`, 1500);
+        player.jailTurns--;
+        await flashCenterEvent(
+          `${player.name} serves sentence. ${player.jailTurns > 0 ? player.jailTurns + ' turn(s) left.' : 'Released next turn!'}`,
+          'jail.png', '\uD83D\uDD12', 1800
+        );
       }
-    } else if (state.owners[landed.id] !== ap) {
-      const rentOwed = calculateRent(landed);
-      const owner = state.owners[landed.id];
-      player.balance -= rentOwed;
-      state.players[owner].balance += rentOwed;
-      renderHUD();
-      await animateCoins(ap, owner, Math.min(Math.ceil(rentOwed / 40), 8));
-      // No property image for rent — keeps notification clean and readable
-      await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, null, `-$${rentOwed}`, 1500);
-      checkBankruptcy(ap);
-      checkWin();
-      finalEvent = { type: 'RENT', p: ap, owner, rent: rentOwed, landed };
-    } else { showCenterIdle(); }
-  }
+      switchTurn(null);
+      return; // finally fires → state.rolling = false
+    }
 
-  // Fix 12: resolve bet AFTER buy/rent so notifications don't overwrite each other
-  await resolveBet(d1, landed);
+    /* ── NORMAL PATH ─────────────────────────────────────────────── */
+    const d1 = Math.ceil(Math.random() * 6);
+    const oldPos = player.position;
+    let newPos = oldPos + d1;
+    const passedGenesis = (oldPos + d1) > 28;
+    if (newPos > 28) newPos -= 28;
+
+    player.position = newPos;
+    if (passedGenesis) player.balance += 200;
+    animatingTokens.add(ap);
+
+    pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
+
+    await animateDice(d1);
+    await animateTokenAlongPath(ap, oldPos, d1, true);
+    if (passedGenesis) {
+      renderHUD();
+      await flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
+      animateCoins('bank', ap, 5);
+      checkWin();
+    } else {
+      renderHUD();
+    }
+
+    if (state.afk) state.afk[ap] = 0;
+
+    // Resume countdown for buy/pass decision window.
+    // handleTurnTimeout fires at 0 → resolveActiveDecision() → closes prompt automatically.
+    resumeTurnTimer();
+    const landed = BOARD.find(s => s.id === newPos);
+
+    /* ── CORNER ──────────────────────────────────────────────────── */
+    if (landed?.type === 'corner') { await handleCorner(landed, ap); }
+
+    /* ── PROPERTY ────────────────────────────────────────────────── */
+    if (landed && (landed.type === 'city' || landed.type === 'utility')) {
+      if (!state.owners[landed.id]) {
+        if (player.balance >= 0 && player.balance >= landed.price) {
+          const decision = await showCenterBuyDecision(landed);
+          if (decision === 'buy') {
+            player.balance -= landed.price;
+            state.stakingPool += Math.round(landed.price * 0.3);
+            state.owners[landed.id] = ap;
+            updateTileOwnerBand(landed.id, ap);
+            renderHUD();
+            await animateCoins(ap, 'bank', 4);
+            const newRent = calculateRent(landed);
+            await flashCenterEvent(`${player.name} bought ${landed.name}!`, landed.image, `Rent: $${newRent}`, 1800);
+            if (landed.type === 'city' && hasMonopoly(ap, landed.tier)) {
+              await flashCenterEvent('\uD83C\uDFC6 MONOPOLY SECURED!', null, 'Rent doubled! You can build!', 2000);
+            }
+            checkWin();
+            finalEvent = { type: 'BUY', p: ap, landed, newRent };
+          } else { showCenterIdle(); }
+        } else if (player.balance < 0) {
+          await flashCenterEvent(`${player.name} is in debt \u2014 can't buy!`, null, null, 1200);
+        } else {
+          await flashCenterEvent(`${player.name} can't afford ${landed.name}!`, null, `$${landed.price}`, 1500);
+        }
+      } else if (state.owners[landed.id] !== ap) {
+        const rentOwed = calculateRent(landed);
+        const owner = state.owners[landed.id];
+        player.balance -= rentOwed;
+        state.players[owner].balance += rentOwed;
+        renderHUD();
+        await animateCoins(ap, owner, Math.min(Math.ceil(rentOwed / 40), 8));
+        await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, null, `-$${rentOwed}`, 1500);
+        checkBankruptcy(ap);
+        checkWin();
+        finalEvent = { type: 'RENT', p: ap, owner, rent: rentOwed, landed };
+      } else { showCenterIdle(); }
+    }
+
+    // Resolve bet AFTER buy/rent so bet notification doesn't overwrite purchase/rent
+    await resolveBet(d1, landed);
+
+    // Stop landing countdown before switchTurn so it doesn't overlap next turn's timer
+    stopTurnTimer();
+    switchTurn(finalEvent);
 
   } catch (e) {
-    console.error('[onRollClick] Unhandled error — recovering:', e);
+    console.error('[onRollClick] Unhandled error \u2014 recovering turn:', e);
+    // Always switch turn even on error — game must never get permanently stuck
+    stopTurnTimer();
+    switchTurn(null);
   } finally {
-    // ALWAYS reset rolling — even if an async step threw an error.
-    // Without this guard the roll button permanently disappears on any exception.
+    // Guaranteed reset — fires even on return/throw inside try
     state.rolling = false;
   }
-
-  switchTurn(finalEvent); // fire-and-forget internally
 }
 
 
@@ -1511,8 +1502,17 @@ function startTurnTimer() {
 
 function resumeTurnTimer() {
   clearInterval(turnTimerInterval);
+  // Safety clamp: if counter was exhausted (e.g. AFK auto-roll fired), reset to 20
+  // so the player gets a fresh window rather than immediately timing out again at 0/-1
+  if (turnTimeLeft <= 0) turnTimeLeft = 20;
   updateTimerUI();
   turnTimerInterval = setInterval(() => {
+    // Check BEFORE decrement — prevents displaying -1 when the interval fires at 0
+    if (turnTimeLeft <= 0) {
+      clearInterval(turnTimerInterval);
+      handleTurnTimeout();
+      return;
+    }
     turnTimeLeft--;
     updateTimerUI();
     if (turnTimeLeft <= 0) {
@@ -1959,10 +1959,14 @@ async function init() {
   setupChat();
   resizeBoard();
   window.addEventListener('resize', resizeBoard);
-  // Preload all board tile images so the property card shows instantly on first click
-  requestIdleCallback(() => {
-    BOARD.forEach(space => { if (space.image) { const i = new Image(); i.src = IMG + space.image; } });
-  }, { timeout: 3000 });
+  // Preload all board tile images into browser cache so property cards show instantly.
+  // Use requestIdleCallback where supported; fall back to setTimeout for older browsers.
+  const preload = () => BOARD.forEach(s => { if (s.image) { new Image().src = IMG + s.image; } });
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(preload, { timeout: 3000 });
+  } else {
+    setTimeout(preload, 500);
+  }
 
   if (!roomCode) {
     console.warn('[init] No room code — redirecting to lobby');
