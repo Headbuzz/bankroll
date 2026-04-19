@@ -11,8 +11,9 @@ import { supabase, getUser } from './supabase.js';
 let roomCode = sessionStorage.getItem('bankroll_room');
 let localId = null;
 let lastProcessedEventId = null;
-let gameId = null;        // UUID primary key for Realtime filter (Fix C)
-let gameVersion = 0;      // OCC sequence counter (Fix D)
+let gameId = null;        // UUID primary key for Realtime filter
+let gameVersion = 0;      // OCC sequence counter
+let channel = null;       // Supabase Realtime channel (broadcast + postgres_changes)
 
 const IMG = 'assets/images/';
 
@@ -839,7 +840,7 @@ function showBettingPanel(bettorId) {
   panel.style.display = 'block';
 
   panel.querySelectorAll('.bet-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
       if (state.bet.active) return;
       const type = btn.dataset.betType;
       const value = btn.dataset.betValue;
@@ -848,8 +849,7 @@ function showBettingPanel(bettorId) {
       renderHUD();
       const targetSpace = BOARD.find(s => String(s.id) === value);
       panel.innerHTML = `<div class="bet-panel__header">\uD83C\uDFAF Bet placed: ${targetSpace ? targetSpace.name : value}</div><div class="bet-panel__cost">Waiting for dice roll...</div>`;
-      // Sync bet to DB so the rolling player can resolve it
-      await pushSyncState();
+      pushSyncState(); // fire-and-forget, no await
     });
   });
 }
@@ -903,7 +903,7 @@ async function onRollClick() {
     player.jailTurns--;
     await flashCenterEvent(`${player.name} is in Jail. ${player.jailTurns > 0 ? player.jailTurns + ' round(s) left.' : 'Released next turn!'}`, 'audit.png', '\uD83D\uDD12', 1800);
     state.rolling = false;
-    await switchTurn(null); // jail state pushed inside switchTurn
+    switchTurn(null);
     return;
   }
 
@@ -913,16 +913,17 @@ async function onRollClick() {
   const passedGenesis = (oldPos + d1) > 28;
   if (newPos > 28) newPos -= 28;
 
-  // Pre-apply position + genesis bonus so the DB push is the final truth
+  // Pre-apply final state so DB push is authoritative immediately
   player.position = newPos;
   if (passedGenesis) player.balance += 200;
 
-  // PUSH 1: ROLL event — P2 gets this and animates. P1's own echo is suppressed by sentBy.
-  await pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
+  // ROLL event: broadcast via fast channel (P2 animates in <200ms),
+  // and persist to DB in background (no await = P1 animates immediately)
+  pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
 
-  // P1 local animations (P2 runs theirs when PUSH 1 arrives)
+  // P1's local animations start immediately (no waiting for server)
   await animateDice(d1);
-  await animateTokenAlongPath(ap, oldPos, d1, true); // skipGenesisBonus=true (already applied above)
+  await animateTokenAlongPath(ap, oldPos, d1, true); // skipGenesisBonus=true (already applied)
   if (passedGenesis) {
     renderHUD();
     flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
@@ -936,7 +937,6 @@ async function onRollClick() {
   const landed = BOARD.find(s => s.id === newPos);
   await resolveBet(d1, landed);
 
-  // Track what happened this turn for P2's final animation
   let finalEvent = null;
 
   if (landed?.type === 'corner') { await handleCorner(landed, ap); }
@@ -960,7 +960,7 @@ async function onRollClick() {
           finalEvent = { type: 'BUY', p: ap, landed };
         } else { showCenterIdle(); }
       } else if (player.balance < 0) {
-        await flashCenterEvent(`${player.name} is in debt — can't buy!`, landed.image, null, 1200);
+        await flashCenterEvent(`${player.name} is in debt \u2014 can't buy!`, landed.image, null, 1200);
       } else {
         await flashCenterEvent(`${player.name} can't afford ${landed.name}!`, landed.image, `$${landed.price}`, 1500);
       }
@@ -979,8 +979,7 @@ async function onRollClick() {
   }
 
   state.rolling = false;
-  // PUSH 2: switchTurn carries the final state (new turn + any BUY/RENT event for P2 to animate)
-  await switchTurn(finalEvent);
+  switchTurn(finalEvent); // fire-and-forget internally
 }
 
 
@@ -1185,12 +1184,12 @@ function renderPlayerCard(elId, player, playerId) {
 /* ══════════════════════════════════════════════
    TURN SWITCHING
    ============================================== */
-// switchTurn optionally carries a finalEvent (BUY/RENT) so P2 sees the animation
-async function switchTurn(finalEvent = null) {
+// switchTurn is synchronous - pushSyncState fires in background, no awaiting
+function switchTurn(finalEvent = null) {
   if (state.gameOver) return;
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
   state.bet = { active: false, bettor: null, betType: null, betValue: null };
-  await pushSyncState(finalEvent); // single push carries new turn + optional buy/rent event
+  pushSyncState(finalEvent); // fire-and-forget: broadcasts instantly, DB syncs in background
   startTurnTimer();
   renderHUD();
   hideBettingPanel();
@@ -1440,8 +1439,8 @@ function showChatToast(name, text, senderId) {
    MULTIPLAYER SYNC HELPERS
    ============================================== */
 
-// FIX A: Extract only Domain Model fields.
-// sentBy tags every push so the sender can suppress their own Realtime echo.
+// FIX A + FAST PATH: Extract Domain Model fields.
+// sentBy tags every push so the sender can ignore their own Realtime echo.
 function getCleanSyncState() {
   return {
     turn:        state.turn,
@@ -1454,43 +1453,50 @@ function getCleanSyncState() {
     gameOver:    state.gameOver,
     last_event:  state.last_event ?? null,
     bet:         state.bet,
-    sentBy:      localId,  // used by Realtime listener to suppress self-echo
-    // rolling, trade are intentionally excluded — View Model only
+    sentBy:      localId,
   };
 }
 
-// FIX D (client): Include client_version so the Edge Function can guard stale writes.
-async function pushSyncState(eventPayload = null) {
+// pushSyncState: FIRE-AND-FORGET — never blocks the caller.
+// Fast path: Supabase Broadcast delivers the event to P2 in <200ms.
+// Slow path: Edge Function persists state to DB (~1-5s), fires postgres_changes.
+function pushSyncState(eventPayload = null) {
   if (!localId) return;
 
   if (eventPayload) {
     state.last_event = Object.assign({ id: crypto.randomUUID(), p: localId }, eventPayload);
-    lastProcessedEventId = state.last_event.id;
+    lastProcessedEventId = state.last_event.id; // mark as self-processed so we don't replay it
   } else {
     state.last_event = null;
   }
 
-  try {
-    const res = await supabase.functions.invoke('game_action', {
-      body: {
-        action: 'state_sync',
-        room_code: roomCode,
-        new_state: getCleanSyncState(), // FIX A: clean state only
-        client_version: gameVersion,    // FIX D: OCC version
-      }
-    });
-    if (res.data?.version) {
-      gameVersion = res.data.version; // advance our local version counter
+  // FAST PATH: Broadcast the event immediately via WebSocket (P2 gets this in <200ms)
+  // Only broadcast animation events — state-only pushes don't need fast path
+  if (channel && state.last_event) {
+    channel.send({
+      type: 'broadcast',
+      event: 'game_event',
+      payload: { ev: state.last_event, sentBy: localId }
+    }).catch(() => {}); // ignore broadcast errors (best-effort)
+  }
+
+  // SLOW PATH: Persist full state to DB in the background (no await)
+  supabase.functions.invoke('game_action', {
+    body: {
+      action: 'state_sync',
+      room_code: roomCode,
+      new_state: getCleanSyncState(),
+      client_version: gameVersion,
     }
+  }).then(res => {
+    if (res.data?.version) gameVersion = res.data.version;
     if (res.data?.conflict) {
-      console.warn('[sync] stale write rejected (OCC). Re-fetching state...');
-      const { data } = await supabase.from('games').select('state, version').eq('id', gameId).single();
-      if (data) {
-        gameVersion = data.version;
-        playbackRender(data.state);
-      }
+      console.warn('[sync] OCC conflict, re-fetching state...');
+      supabase.from('games').select('state, version').eq('id', gameId).single().then(({ data }) => {
+        if (data) { gameVersion = data.version; playbackRender(data.state); }
+      });
     }
-  } catch(e) { console.error('[sync] pushSyncState error:', e); }
+  }).catch(e => console.error('[sync] DB push error:', e));
 }
 
 // FIX E: Smart merge — update Domain Model from server, preserve local View Model.
@@ -1633,21 +1639,37 @@ async function init() {
   startTurnTimer();
 
   // FIX C: Filter by primary key `id` — reliable on all Supabase plans
-  const channel = supabase.channel(`room:${gameId}`);
+  // Use module-scope `channel` variable so pushSyncState can call channel.send()
+  channel = supabase.channel(`room:${gameId}`);
   
+  // FAST PATH: game_event broadcast — P2 animates dice+token in <200ms (no DB round-trip)
+  channel.on('broadcast', { event: 'game_event' }, async (payload) => {
+    const { ev, sentBy } = payload.payload ?? {};
+    if (!ev || sentBy === localId) return; // suppress self
+    if (ev.id === lastProcessedEventId) return; // already processed
+    lastProcessedEventId = ev.id; // mark so postgres_changes skips animation
+
+    if (ev.type === 'ROLL') {
+      await animateDice(ev.dice);
+      await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis);
+      if (ev.passedGenesis) {
+        flashCenterEvent(`${state.players[ev.p]?.name || 'Opponent'} collected $200!`, null, '+$200', 1200);
+        animateCoins('bank', ev.p, 5);
+      }
+    }
+    // BUY/RENT come via postgres_changes full state — no broadcast handling needed
+  });
+
+  // SLOW PATH: postgres_changes — arrives after Edge Function persists state (~1-5s)
+  // By then broadcast already animated ROLL; this only merges state + plays BUY/RENT
   channel.on('postgres_changes', { 
     event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` 
   }, payload => {
     if (payload.new.version !== undefined) {
       gameVersion = payload.new.version;
     }
-    // SELF-ECHO SUPPRESSION: ignore Realtime events that we ourselves pushed.
-    // Without this, our own pushSyncState triggers playbackRender which:
-    //   - creates a second floating token (double animation glitch)
-    //   - resets state.rolling=false prematurely (breaks animation guard)
-    //   - starts a duplicate turn timer
+    // Self-echo suppression: we already applied this state locally
     if (payload.new.state?.sentBy === localId) {
-      console.log('[realtime] suppressed self-echo');
       return;
     }
     playbackRender(payload.new.state);
