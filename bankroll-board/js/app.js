@@ -517,8 +517,10 @@ async function animateTokenAlongPath(playerId, fromId, steps, skipGenesisBonus =
   const player = state.players[playerId];
   const path = getPathIds(fromId, steps);
   if (!path.length) return;
+  // LOCK FIRST before setting destination — prevents syncBoardState placing a ghost token
+  // at the destination between 'player.position = newPos' and lock acquisition
+  animatingTokens.add(playerId);
   player.position = path[path.length - 1];
-  animatingTokens.add(playerId); // LOCK: prevent syncBoardState ghost token during animation
   removeStaticToken(playerId);
   const token = document.createElement('img');
   token.className = 'token-float'; token.src = IMG + player.tokenImg; token.draggable = false;
@@ -526,24 +528,26 @@ async function animateTokenAlongPath(playerId, fromId, steps, skipGenesisBonus =
   const startPos = getTileCenter(fromId);
   if (startPos) { token.style.left = startPos.x + 'px'; token.style.top = startPos.y + 'px'; }
   token.getBoundingClientRect();
-  for (const spaceId of path) {
-    SFX_STEP.currentTime = 0; SFX_STEP.play().catch(()=>{});
-    const pos = getTileCenter(spaceId);
-    if (pos) { token.style.left = pos.x + 'px'; token.style.top = pos.y + 'px'; }
-    
-    if (spaceId === 1 && !skipGenesisBonus) {
-      player.balance += 200; renderHUD();
-      flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
-      animateCoins('bank', playerId, 5);
-      checkWin();
+  try {
+    for (const spaceId of path) {
+      SFX_STEP.currentTime = 0; SFX_STEP.play().catch(()=>{});
+      const pos = getTileCenter(spaceId);
+      if (pos) { token.style.left = pos.x + 'px'; token.style.top = pos.y + 'px'; }
+      if (spaceId === 1 && !skipGenesisBonus) {
+        player.balance += 200; renderHUD();
+        flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
+        animateCoins('bank', playerId, 5);
+        checkWin();
+      }
+      await sleep(200);
     }
-    
-    await sleep(200);
+    token.classList.add('token-float--bounce'); await sleep(400);
+  } finally {
+    // Always unlock and place static token, even if an error interrupted the animation
+    token.remove();
+    animatingTokens.delete(playerId);
+    placeStaticToken(playerId);
   }
-  token.classList.add('token-float--bounce'); await sleep(400);
-  token.remove();
-  animatingTokens.delete(playerId); // UNLOCK
-  placeStaticToken(playerId);
   return path[path.length - 1];
 }
 
@@ -942,13 +946,17 @@ async function onRollClick() {
   player.position = newPos;
   if (passedGenesis) player.balance += 200;
 
+  // Lock the token NOW (before dice animation starts) so that any Postgres event that arrives
+  // during the dice animation cannot place a static token at the destination.
+  animatingTokens.add(ap);
+
   // ROLL event: broadcast via fast channel (P2 animates in <200ms),
   // and persist to DB in background (no await = P1 animates immediately)
   pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
 
   // P1's local animations start immediately (no waiting for server)
   await animateDice(d1);
-  await animateTokenAlongPath(ap, oldPos, d1, true); // skipGenesisBonus=true (already applied)
+  await animateTokenAlongPath(ap, oldPos, d1, true); // animateToken re-adds lock internally (idempotent Set)
   if (passedGenesis) {
     renderHUD();
     // MUST be awaited — otherwise the $200 flash timer fires during the buy decision and clears it!
@@ -1242,6 +1250,14 @@ function updateTileOwnerBand(spaceId, playerId) {
   const band = tile.querySelector('.tile__band');
   if (band) band.style.background = PLAYER_COLORS[playerId];
 
+  // Show current rent on the tile price label (replaces purchase price)
+  const priceEl = tile.querySelector('.tile__price');
+  const space = BOARD.find(s => s.id === spaceId);
+  if (priceEl && space) {
+    const rent = calculateRent(space);
+    priceEl.textContent = rent > 0 ? `Rent $${rent}` : `$${space.price}`;
+  }
+
   // Stamp ownership token on the card
   let badge = tile.querySelector('.tile__owner-badge');
   if (!badge) {
@@ -1257,6 +1273,10 @@ function resetTileBandColor(spaceId, space) {
   const band = tile.querySelector('.tile__band');
   if (band) band.style.background = space.type === 'city' ? TIERS[space.tier].darker : '#B0BEC5';
   
+  // Restore original purchase price
+  const priceEl = tile.querySelector('.tile__price');
+  if (priceEl) priceEl.textContent = `$${space.price}`;
+
   const badge = tile.querySelector('.tile__owner-badge');
   if (badge) badge.remove();
 }
@@ -1604,7 +1624,7 @@ async function _playbackImpl(payloadState) {
       // Animate + merge state immediately from broadcast payload (no waiting for DB)
       await animateCoins(ev.p, 'bank', 4);
       const buyerName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await flashCenterEvent(`${buyerName} bought ${ev.landed.name}!`, ev.landed.image, `Rent: $${ev.newRent ?? ev.landed.price}`, 1800);
+      await flashCenterEvent(`\uD83C\uDFD9\uFE0F ${buyerName} bought ${ev.landed.name}!`, null, `Rent: $${ev.newRent ?? ev.landed.price}`, 1500);
     } else if (ev.type === 'RENT') {
       await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
       const payerName = payloadState.players?.[ev.p]?.name || 'Opponent';
@@ -1667,8 +1687,9 @@ function mergeServerState(payloadState) {
     }
   }
 
-  // Safety net: release any stuck animation lock
-  state.rolling = false;
+  // NEVER reset state.rolling here — if localId is mid-roll, this would unlock a second roll.
+  // state.rolling is managed exclusively by onRollClick and the roll completion path.
+  if (localId !== state.turn) state.rolling = false; // only safe to reset for remote player
 }
 
 function syncBoardState() {
