@@ -6,11 +6,11 @@
 
 'use strict';
 
-const IMG = '../';
+const IMG = 'assets/images/';
 
-const SFX_DICE = new Audio('../dice.mp3');
-const SFX_STEP = new Audio('../markerforwardsound.wav');
-const SFX_COIN = new Audio('../coinsound.mp3');
+const SFX_DICE = new Audio('assets/sounds/dice.mp3');
+const SFX_STEP = new Audio('assets/sounds/markerforwardsound.wav');
+const SFX_COIN = new Audio('assets/sounds/coinsound.mp3');
 SFX_DICE.volume = 0.6;
 SFX_STEP.volume = 0.4;
 SFX_COIN.volume = 0.5;

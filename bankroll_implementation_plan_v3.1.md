@@ -1,0 +1,810 @@
+# BANKROLL — FINAL GAME DESIGN DOCUMENT (v3.1)
+
+> **STATUS: ALL DECISIONS FINALIZED — READY FOR DEVELOPMENT**
+> All open questions resolved. Themed property names assigned. Platform economics locked.
+
+---
+
+## 1. EXECUTIVE SUMMARY
+
+**Bankroll** is a high-stakes, skill-based, Web3 real estate trading game for modern browsers. Fast matches, aggressive economics, a strict Net Worth win condition, a dynamically funded Staking Pool, and real-time Prediction Markets reward strategic financial planning over luck.
+
+**Core Design Pillars:**
+1. Respect the player's time and $5 entry fee
+2. Every decision must have meaningful economic consequence
+3. Zero downtime — players are financially engaged even during opponents' turns
+4. Definitive endings — no slow-death spirals
+
+---
+
+## 2. MATCH PARAMETERS & ESCROW ECONOMICS
+
+| Parameter | Value |
+|---|---|
+| Platform | Desktop Web Browser (primary), Mobile (responsive) |
+| Entry Fee | $5.00 equivalent in SOL/USDC |
+| 2-Player Prize Pool | $10 total → **$9.00 to winner** (10% platform fee) |
+| 4-Player Prize Pool | $20 total → **$18.00 to winner** (10% platform fee) |
+| **Platform Fee** | **10% of total prize pool** → Bankroll treasury |
+| Match Duration | Unlimited rounds |
+| 2P Win Condition (Net Worth) | $3,000 |
+| 4P Win Condition (Net Worth) | $5,000 |
+| Alt Win Condition | Last Player Standing (all opponents bankrupt) |
+| Turn Timer | 45 seconds |
+| AFK Strikes to Forfeit | 3 consecutive |
+
+### 2.0.1 Platform Fee Breakdown
+| Mode | Total Pool | 10% Fee | Winner Receives |
+|---|---|---|---|
+| 2-Player Duel | $10.00 | $1.00 | **$9.00** |
+| 4-Player Rumble | $20.00 | $2.00 | **$18.00** |
+
+> The 10% fee is deducted by the escrow smart contract at settlement. Fee is sent to the Bankroll treasury wallet.
+
+### 2.1 Net Worth Calculation Engine
+```
+Net Worth = [Liquid Cash] 
+          + [100% Base Buy Price of all owned Properties] 
+          + [100% Cost of all purchased Buildings]
+```
+
+> [!IMPORTANT]
+> **Liquidation Penalty:** Selling a property back to the Bank returns only **80%** of its value. This actively damages Net Worth and punishes panic-selling.
+
+### 2.2 AFK Forfeit Protocol
+- Strike 1-2: Warning overlay on player's avatar
+- Strike 3: Avatar shatters, liquid cash burned, all properties returned to Bank as unowned
+
+---
+
+## 3. THE 28-SPACE BOARD 🔄
+
+### 3.1 Board Layout (Clockwise from Genesis)
+
+The board is a 28-space grid (7 per side, including corners). Properties escalate in value as you travel around the board. The most dangerous (expensive) tiles sit right *before* Genesis, meaning players must survive the Red gauntlet to collect their $200 salary.
+
+```
+                       ← TOP SIDE (moving left) ←
+   ┌────────┬────────┬────────┬────────┬────────┬────────┬────────┬────────┐
+   │ LUCKY  │LONDON  │HONG    │TOKYO   │ ☁️     │ZURICH  │SYDNEY  │STAKING │
+   │ CARD   │  $280  │ KONG   │  $255  │INTERNET│  $240  │  $220  │ POOL   │
+   │ Corner │  🟪    │ $265 🟪│  🟪    │  $150  │  🟪    │  🟧    │Corner  │
+   ├────────┼────────┴────────┴────────┴────────┴────────┴────────┼────────┤
+   │SHANGHAI│                                                    │BERLIN  │
+   │ $300 🟥│                                                    │$190 🟧 │
+   ├────────┤                                                    ├────────┤
+   │  🚢    │                                                    │ SEOUL  │
+   │SHIPPING│                                                    │$180 🟧 │
+   │  $150  │                                                    │        │
+   ├────────┤              B A N K R O L L                       ├────────┤
+   │SINGAPORE                                                   │MUMBAI  │
+   │ $315 🟥│              [Staking Pool]                        │$160 🟦 │
+   ├────────┤                                                    ├────────┤
+   │ DUBAI  │                                                    │  ⚡    │
+   │ $335 🟥│                                                    │ELECTRIC│
+   │        │                                                    │  $150  │
+   ├────────┤                                                    ├────────┤
+   │NEW YORK│                                                    │SÃO     │
+   │ $350 🟥│                                                    │PAULO   │
+   │        │                                                    │$145 🟦 │
+   ├────────┤                                                    ├────────┤
+   │        │                                                    │ISTANBUL│
+   │        │                                                    │$130 🟦 │
+   ├────────┼────────┬────────┬────────┬────────┬────────┬────────┼────────┤
+   │GENESIS │ LAGOS  │NAIROBI │  ✈️    │ HANOI  │MEDELLÍN│BANGKOK │ AUDIT  │
+   │(Start) │ $80 🟩 │ $85 🟩 │AIRPORT │ $90 🟩 │$100 🟩 │$120 🟦 │(Jail)  │
+   │ +$200  │        │        │  $150  │        │        │        │2 Turns │
+   └────────┴────────┴────────┴────────┴────────┴────────┴────────┴────────┘
+                       → BOTTOM SIDE (moving right) →
+```
+
+> **Reading direction:** Players move clockwise. Bottom → Right → Top → Left → back to Genesis.
+>
+> **Color flow:** Each color tier is **100% contiguous** — groups wrap around corners but are never split. Green fills most of bottom → Blue bridges bottom-right corner → Orange fills most of right → Purple bridges top sides → Red fills left.
+
+### 3.2 Complete Space Index
+
+| # | Space | City Name | Type | Price | Side | Color |
+|---|---|---|---|---|---|---|
+| 1 | **Genesis** | — | Corner — +$200 Salary | — | Bottom-Left | — |
+| 2 | 🟩 Green 1 | **Lagos** | City — Tier 1 | $80 | Bottom | Green |
+| 3 | 🟩 Green 2 | **Nairobi** | City — Tier 1 | $85 | Bottom | Green |
+| 4 | ✈️ Utility | **Airport** | Public Property | $150 | Bottom (center) | — |
+| 5 | 🟩 Green 3 | **Hanoi** | City — Tier 1 | $90 | Bottom | Green |
+| 6 | 🟩 Green 4 | **Medellín** | City — Tier 1 | $100 | Bottom | Green |
+| 7 | 🟦 Blue 1 | **Bangkok** | City — Tier 2 | $120 | Bottom | Blue |
+| 8 | **Audit** | — | Corner — 2 Turn Jail | — | Bottom-Right | — |
+| 9 | 🟦 Blue 2 | **Istanbul** | City — Tier 2 | $130 | Right | Blue |
+| 10 | 🟦 Blue 3 | **São Paulo** | City — Tier 2 | $145 | Right | Blue |
+| 11 | ⚡ Utility | **Electric** | Public Property | $150 | Right (center) | — |
+| 12 | 🟦 Blue 4 | **Mumbai** | City — Tier 2 | $160 | Right | Blue |
+| 13 | 🟧 Orange 1 | **Seoul** | City — Tier 3 | $180 | Right | Orange |
+| 14 | 🟧 Orange 2 | **Berlin** | City — Tier 3 | $190 | Right | Orange |
+| 15 | **Staking Pool** | — | Corner — Jackpot Payout | — | Top-Right | — |
+| 16 | 🟧 Orange 3 | **Toronto** | City — Tier 3 | $205 | Top | Orange |
+| 17 | 🟧 Orange 4 | **Sydney** | City — Tier 3 | $220 | Top | Orange |
+| 18 | ☁️ Utility | **Internet** | Public Property | $150 | Top (center) | — |
+| 19 | 🟪 Purple 1 | **Zurich** | City — Tier 4 | $240 | Top | Purple |
+| 20 | 🟪 Purple 2 | **Tokyo** | City — Tier 4 | $255 | Top | Purple |
+| 21 | 🟪 Purple 3 | **Hong Kong** | City — Tier 4 | $265 | Top | Purple |
+| 22 | **Lucky Card** | — | Corner — Draw 1 Card | — | Top-Left | — |
+| 23 | 🟪 Purple 4 | **London** | City — Tier 4 | $280 | Left | Purple |
+| 24 | 🟥 Red 1 | **Shanghai** | City — Tier 5 | $300 | Left | Red |
+| 25 | 🚢 Utility | **Shipping** | Public Property | $150 | Left (center) | — |
+| 26 | 🟥 Red 2 | **Singapore** | City — Tier 5 | $315 | Left | Red |
+| 27 | 🟥 Red 3 | **Dubai** | City — Tier 5 | $335 | Left | Red |
+| 28 | 🟥 Red 4 | **New York** | City — Tier 5 | $350 | Left | Red |
+
+**Color Group Contiguity Map:**
+```
+🟩 Green:  Spaces 2, 3, 5, 6      (Bottom side — all 4, separated by Airport utility)
+🟦 Blue:   Spaces 7, 9, 10, 12    (Wraps bottom→right around Audit corner)
+🟧 Orange: Spaces 13, 14, 16, 17  (Wraps right→top around Staking Pool corner)  
+🟪 Purple: Spaces 19, 20, 21, 23  (Wraps top→left around Lucky Card corner)
+🟥 Red:    Spaces 24, 26, 27, 28  (Left side — all 4, separated by Shipping utility)
+```
+
+> Each color group is perfectly contiguous. The utility in each side's center slot acts as a natural divider between adjacent color groups on the same side.
+
+### 3.3 🔄 Lucky Card — Single Corner Space
+
+> **Design Decision:** Only **1 Lucky Card space** exists on the entire board (the top-left corner, replacing the old OTC Desk). With 2d6 on a 28-tile board, any given player lands on a specific tile roughly **once every 14 turns**. This makes Lucky Card draws rare, high-stakes events — not a constant disruption.
+
+With ~8 cards in the deck, each draw is a major swing moment. Players will dread/anticipate approaching that corner.
+
+### 3.4 Staggered Starting Capital (First-Mover Neutralization)
+
+| Turn Order | Starting Cash |
+|---|---|
+| Player 1 | $1,000 |
+| Player 2 | $1,025 |
+| Player 3 | $1,050 |
+| Player 4 | $1,075 |
+
+---
+
+## 4. THE REAL ESTATE ECONOMY
+
+### 4.1 Public Properties (Utilities)
+
+Four global infrastructure utilities. Cannot be upgraded with buildings.
+
+| Utility | Icon | Buy Price |
+|---|---|---|
+| ✈️ Airport | Airline hub | $150 |
+| ⚡ Electric | Power grid | $150 |
+| ☁️ Internet | Cloud & data | $150 |
+| 🚢 Shipping | Sea freight | $150 |
+
+**Rent scales with ownership count:**
+
+| # Owned | Rent Charged |
+|---|---|
+| 1 | $20 |
+| 2 | $50 |
+| 3 | $90 |
+| 4 (Monopoly) | $140 |
+
+- High-liquidity trade chips on the OTC system
+
+### 4.2 City Properties — Full Pricing with Names
+
+| Tier | Color | Cities | Prices | Base Rent | Monopoly | +1 Bldg | +2 Bldg | +3 Bldg (Max) | Bldg Cost |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 🟩 Green | Lagos, Nairobi, Hanoi, Medellín | $80-$100 | $10 | $20 | $40 | $90 | $180 | $50 |
+| 2 | 🟦 Blue | Bangkok, Istanbul, São Paulo, Mumbai | $120-$160 | $20 | $40 | $80 | $160 | $320 | $80 |
+| 3 | 🟧 Orange | Seoul, Berlin, Toronto, Sydney | $180-$220 | $35 | $70 | $140 | $280 | $500 | $100 |
+| 4 | 🟪 Purple | Zurich, Tokyo, Hong Kong, London | $240-$280 | $50 | $100 | $200 | $420 | $750 | $120 |
+| 5 | 🟥 Red | Shanghai, Singapore, Dubai, New York | $300-$350 | $70 | $140 | $280 | $600 | $1,000 | $150 |
+
+> [!NOTE]
+> **Monopoly Rule:** Rent stays at Base until a player owns **all 4 properties** in a tier. Monopoly instantly doubles rent to 2x and unlocks building rights. Max 3 buildings per property.
+
+### 4.3 Worst-Case Scenario Math
+A fully upgraded Red 4 costs: $350 (buy) + $450 (3 × $150 buildings) = **$800 total investment**.
+It deals **$1,000 rent** — a **125% ROI on a single landing** and an instant-kill against the $1,000 starting economy.
+
+---
+
+## 5. CORE CRYPTO-NATIVE MECHANICS
+
+### 5.1 The Staking Pool (Liquidity Vacuum)
+
+Located at the **top-right corner**. Starts at $0 every match.
+
+**Inflow (money enters the pool):**
+- Audit bailout fees ($150)
+- Negative Lucky Card fines
+- Lost Prediction Market bets 🔄
+- The Tumbler Protocol card (all players pay $100)
+
+**Outflow:**
+- When a player lands **directly** on the Staking Pool tile → they collect **100% of accumulated cash**
+- Pool immediately resets to $0
+
+**Why it matters:** As the game progresses, the pool swells into $300-$600+. Landing on it can slingshot a losing player back into contention.
+
+### 5.2 🔄 The OTC Desk (Anywhere Trading for $60)
+
+> **Design Decision:** The OTC is no longer a board space. It's a **UI action available during any player's turn** for a **$60 fee** paid to the Staking Pool.
+
+**How it works:**
+1. During your turn (after rolling), press the "Trade" button on the HUD
+2. Pay $60 fee → money goes to Staking Pool
+3. Select an opponent and construct a trade proposal (any combo of Cash + Properties)
+4. Opponent has **15 seconds** to Accept or Reject — no counter-offers
+5. Timer expires = trade voided, $60 fee is NOT refunded
+
+**Why $60 to the Staking Pool?**
+- High cost prevents spam trading — every trade proposal is a serious commitment
+- Aggressively feeds the Staking Pool jackpot
+- Creates a real cost-benefit decision: *"Is this trade worth $60 to initiate?"*
+- Against a $1,000 starting economy, $60 is 6% of your cash — you don't trade casually
+
+### 5.3 🔄 The Prediction Market (Rebalanced)
+
+> **Design Decision:** Lost bets go to the **Staking Pool**, not burned. This means prediction betting feeds the comeback mechanic.
+
+**Available during opponents' turns only.** A minimalist UI slides up before the dice roll.
+
+| Bet Type | Cost | Payout | Probability (approx.) | Expected Value | House Edge → Pool |
+|---|---|---|---|---|---|
+| **Color Tier** ("Will land on Red") | $30 | $175 (≈5.8x) | ~14.3% (4/28) | -$4.98 | ~16.6% |
+| **Board Half** ("Will land on tiles 1-14") | $30 | $52 (≈1.73x) | 50% | -$4.00 | ~13.3% |
+
+**Key design points:**
+- Costs reduced from $50 → $30 to encourage usage
+- Color Tier bet is now 5.8x (was 3x) — much fairer but still slight house edge
+- Board Half bet is a conservative, low-risk option
+- **Lost bets feed the Staking Pool** — creating an indirect comeback path
+- Players who track dice probability distributions (2d6 peaks at 7) gain genuine skill edge
+
+> [!NOTE]
+> With 2d6, movement isn't uniformly distributed across spaces. A player 7 spaces away from a Red tile is statistically more likely to land there than someone 2 or 12 spaces away. Skilled players who track board analytics can make the Prediction Market +EV in specific situations.
+
+### 5.4 🔄 Audit (Jail) — Revised
+
+| Rule | Detail |
+|---|---|
+| Duration | **2 turns** (reduced from 3) |
+| Bail Cost | $150 (goes to Staking Pool) |
+| Bail Timing | **Immediately upon landing** — player chooses to pay $150 or sit |
+| Rolling Doubles | On each jailed turn, player rolls. Doubles = free release |
+| Salary Pass | Going to Audit does NOT trigger Genesis salary |
+
+**Player's choice on landing:**
+1. **Bail out immediately** → Pay $150 to Staking Pool, continue playing
+2. **Sit it out** → Skip up to 2 turns, attempt doubles each turn for free release
+
+---
+
+## 6. THE LUCKY CARD DECK (8 Cards)
+
+Only drawn when landing on the **Lucky Card corner** (Space #22). One card drawn per landing. Deck reshuffles when exhausted.
+
+### Category A: Capital Injections (3 Cards)
+
+| Card | Effect |
+|---|---|
+| **The Airdrop** | Collect $200 from the Bank |
+| **Seed Funding** | If Liquid Cash < $200: Bank grants $300. Otherwise: collect $50 |
+| **White-Hat Bounty** | Collect $100 from the player with highest Net Worth |
+
+### Category B: Liquidity Drains (3 Cards)
+
+| Card | Effect |
+|---|---|
+| **Network Congestion** | Pay $50 per building you own → Staking Pool |
+| **Smart Contract Exploit** | Lose $150 → Staking Pool |
+| **Subpoena** | Go directly to Audit. No Genesis salary. |
+
+### Category C: Protocol Shakers (2 Cards)
+
+| Card | Effect |
+|---|---|
+| **The Tumbler Protocol** | ALL players pay $100 → Staking Pool (instant $200-$400 jackpot) |
+| **Ecosystem Migration** | Move to any unowned Public Property and may buy it. If all owned, pay rent to current owner. |
+
+> **Balance note:** 3 positive + 3 negative + 2 chaotic = slight positive skew. Since landing on the Lucky Card corner is rare (~once per 14 turns per player), each draw is a high-impact event.
+
+---
+
+## 7. USER INTERFACE & GAME FEEL
+
+### 7.1 Visual Identity — Premium Luxury
+
+> [!IMPORTANT]
+> **No neon gradients. No glowing borders. No cyberpunk.** The visual identity should feel like a premium, tactile board game — rich materials, clean typography, understated elegance.
+
+**Core Palette:**
+
+| Element | Color | Hex |
+|---|---|---|
+| Background | Deep charcoal | `#1A1A2E` |
+| Board surface | Rich dark navy | `#16213E` |
+| Tile backgrounds | Warm off-white | `#F5F0E8` |
+| Primary text (on dark) | Cream | `#F0E6D2` |
+| Primary text (on light) | Near-black | `#0F0F0F` |
+| Accent / highlights | Warm gold | `#D4A843` |
+| Danger / debt | Deep crimson | `#9B1B30` |
+| Success / income | Rich emerald | `#2D6A4F` |
+
+**Tier Colors (Matte, Saturated — not neon):**
+
+| Tier | Color Name | Hex | Feel |
+|---|---|---|---|
+| 1 | Forest Green | `#2D6A4F` | Earthy, humble |
+| 2 | Deep Navy | `#1D3557` | Stable, cool |
+| 3 | Terracotta | `#E76F51` | Warm, energetic |
+| 4 | Amethyst | `#6A4C93` | Luxurious, rare |
+| 5 | Crimson | `#C1121F` | Danger, power |
+
+**Design Principles:**
+- Property tiles have **matte colored headers** with clean white body — like real property cards. **Crucially, when a player buys a property, the header band permanently changes to match the buying player's marker color (Red, Green, Yellow, or Blue).**
+- Buttons are solid fills with subtle shadows, **no glows or gradients**
+- Typography: **DM Serif Display** for property names/headings, **Inter** for numbers/UI
+- Board border has a subtle **wood grain texture** — feels like a real tabletop
+- Player markers are simple, clean geometric shapes using the core player colors: Red, Green, Yellow, and Blue.
+- Money displays use warm gold `#D4A843` — feels valuable, not flashy
+- Staking Pool tile has a **subtle shimmer** animation (not a glow — think gold dust)
+
+### 7.1.1 Turn Timer Bar
+
+A **horizontal countdown bar** sits at the top of the game area during each player's turn:
+
+| Timer Range | Bar Color | Behavior |
+|---|---|---|
+| 45s → 15s | Emerald `#2D6A4F` | Smooth, steady drain |
+| 15s → 5s | Warm amber `#E9A820` | Slightly faster pulse |
+| 5s → 0s | Crimson `#C1121F` | Bar flashes, ticking SFX plays |
+| 0s | Empty | AFK strike issued |
+
+- Bar width represents time remaining (100% → 0%)
+- Current player's name and avatar shown next to the bar
+- Timer resets to 45s at the start of each turn
+- Bar is always visible to all players and spectators
+
+### 7.1.2 Audio Design — SFX Only (No Soundtrack)
+
+| Event | Sound Effect |
+|---|---|
+| Dice Roll | Clicking dice tumble |
+| Property Purchase | Cash register cha-ching |
+| Rent Payment | Coins clinking + whoosh |
+| Building Placed | Construction thud |
+| Bankruptcy | Glass shatter |
+| Staking Pool Hit | Triumphant jackpot chime |
+| Lucky Card Draw | Suspenseful card flip |
+| Trade Accepted | Handshake click |
+| Turn Timer Warning (5s) | Soft ticking |
+| Victory | Crowd roar + fanfare |
+
+> SFX will be generated/sourced from royalty-free libraries. No background music — keeps the game feeling tense and competitive.
+
+### 7.2 Progressive Onboarding (No Tutorials)
+
+1. **Staking Pool Teaching:** When money enters the pool, gold coins arc from the source across the board into the pool tile. Counter ticks up. Player learns: *"That tile holds money."*
+
+2. **Prediction Market Teaching:** Invisible during your turn. Only slides up during opponent's turn with a clean binary: *"Bet $30 on Red? [Yes] / [No]"*
+
+3. **Monopoly Teaching:** First time securing 4-of-a-tier → 2.5s pause, properties highlight with gold border, text: *"Monopoly Secured. Tap a property to build."* Never shows again.
+
+4. **OTC Teaching:** First turn, a subtle pulsing "Trade" button appears in the HUD corner with a one-time tooltip: *"Pay $60 to propose a trade with any player."*
+
+### 7.3 Coin Animation System
+
+> **Every single money transfer in the game is visualized with animated gold coins.** This is the primary way players understand the flow of money.
+
+**Animation Spec:**
+- Coins are small, gold-colored circles with a subtle 3D spin
+- Travel along an **arc trajectory** (not a straight line) — feels physical and weighty
+- Number of coins scales with amount (small transfer = 3-5 coins, large = 15-20 coins)
+- Coins have a subtle **trail effect** as they move
+- Impact point has a small **burst particle** when coins arrive
+- Duration: ~0.8s for the full arc
+
+**All Coin Transfer Routes:**
+
+| Transfer | From → To | When |
+|---|---|---|
+| Salary | Bank → Player | Passing Genesis |
+| Property Purchase | Player → Bank | Buying unowned property |
+| Building Purchase | Player → Bank | Constructing a building |
+| Rent Payment | Player A → Player B | Landing on owned property |
+| Audit Bailout | Player → Staking Pool tile | Paying $150 to exit jail |
+| OTC Fee | Player → Staking Pool tile | Initiating a trade |
+| Lucky Card Fine | Player → Staking Pool tile | Negative card drawn |
+| Lost Prediction Bet | Player → Staking Pool tile | Bet lost after dice roll |
+| Staking Pool Payout | Staking Pool tile → Player | Landing on pool tile |
+| Lucky Card Bonus | Bank → Player | Positive card drawn |
+| White-Hat Bounty | Richest Player → Card Drawer | Collecting $100 from leader |
+| Tumbler Protocol | ALL Players → Staking Pool | Everyone pays $100 |
+| Won Prediction Bet | Staking Pool tile → Player | Bet won after dice roll |
+| Property Liquidation | Bank → Player | Selling property (80% value) |
+| Trade Cash Transfer | Player A ↔ Player B | OTC trade accepted |
+
+### 7.4 Other Visual Effects
+
+| Event | Visual Effect |
+|---|---|
+| Bankruptcy | Avatar shatters like glass, properties fade to gray, alert to survivors |
+| Lucky Card Draw | Text pop-up appears in the center space of the board telling the result (no card illustrations) |
+| Building Purchase | Building icon appears on property tile with a small placement thud |
+| Net Worth Milestone (50%, 75%, 90%) | Gold progress bar flashes, subtle pulse |
+| Victory | Full-screen confetti (gold + winner's tier color), trophy animation |
+
+---
+
+## 8. TECHNICAL ARCHITECTURE 🔄
+
+> [!IMPORTANT]
+> This section is entirely new — covering the complete backend, real-time infrastructure, blockchain integration, and deployment strategy.
+
+### 8.1 High-Level Architecture
+
+```mermaid
+graph TB
+    subgraph Client ["🖥️ Client (Browser)"]
+        NEXT["Next.js 14+ (App Router)"]
+        PIXI["PixiJS (WebGL Board Renderer)"]
+        SOCK_C["Socket.IO Client"]
+        PRIVY["Privy SDK (Embedded Wallet)"]
+    end
+
+    subgraph GameServer ["⚙️ Game Server"]
+        NODE["Node.js + Express"]
+        SOCK_S["Socket.IO Server"]
+        ENGINE["Game Engine (Authoritative)"]
+        MATCH["Matchmaking Service"]
+    end
+
+    subgraph Data ["💾 Data Layer"]
+        PG["PostgreSQL (Supabase)"]
+        REDIS["Redis (Upstash)"]
+    end
+
+    subgraph Chain ["⛓️ Solana Blockchain"]
+        ESCROW["Escrow Program (Anchor)"]
+        WALLET["Player Embedded Wallets"]
+    end
+
+    NEXT <--> SOCK_C
+    SOCK_C <-->|"WebSocket (wss://)"| SOCK_S
+    SOCK_S <--> ENGINE
+    ENGINE <--> MATCH
+    ENGINE <--> REDIS
+    ENGINE <--> PG
+    PRIVY <--> WALLET
+    ENGINE -->|"Victory Proof"| ESCROW
+    ESCROW <--> WALLET
+```
+
+### 8.2 Tech Stack
+
+| Layer | Technology | Rationale |
+|---|---|---|
+| **Frontend Framework** | Next.js 14+ (TypeScript) | SSR for landing/lobby, CSR for game board. App Router for layouts. |
+| **Board Rendering** | PixiJS v8 | 2D WebGL. 60fps board, particles, coin animations. Lighter than Three.js for 2D. |
+| **Real-time Comms** | Socket.IO | WebSocket with automatic fallback. Rooms for matches. Built-in reconnection. |
+| **Game Server** | Node.js + Express | Single-threaded event loop ideal for turn-based game logic. |
+| **Database** | PostgreSQL via Supabase | User profiles, match history, leaderboards, analytics. |
+| **Session/Game State** | Redis via Upstash | In-memory game state for active matches. Sub-ms reads. Auto-expire stale sessions. |
+| **Blockchain** | Solana (Mainnet-Beta) | ~400ms finality, <$0.001 fees. Ideal for $5 micro-transactions. |
+| **Smart Contracts** | Anchor Framework (Rust) | Type-safe Solana program development. Escrow + payout logic. |
+| **Embedded Wallet** | Privy | In-app wallet generation. No MetaMask popup. Email/social login → auto wallet. |
+| **Hosting (Frontend)** | Vercel | Edge-optimized Next.js deployment. |
+| **Hosting (Game Server)** | Railway or Fly.io | Persistent WebSocket connections. Auto-scaling. Low-latency regions. |
+| **Hosting (Redis)** | Upstash | Serverless Redis. Pay-per-request. Global replication. |
+
+### 8.3 Authoritative Game Server — Why It Matters
+
+> [!CAUTION]
+> **The game server is the single source of truth.** The client is a dumb renderer. Every game action — dice rolls, rent calculations, Net Worth updates, purchases — is validated and executed server-side. The client sends *intents* ("I want to buy this property"), and the server responds with *confirmed state updates*.
+
+**What the server controls:**
+- 🎲 Dice RNG (cryptographically secure, server-generated)
+- 💰 All money transfers (rent, salary, fines, bets)
+- 📊 Net Worth calculation and win condition checks
+- 🏗️ Property ownership and building state
+- ⏱️ Turn timer enforcement and AFK detection
+- 🃏 Lucky Card deck order (shuffled server-side)
+
+**What the client does:**
+- Renders the board and animations
+- Sends player action intents via WebSocket
+- Receives and applies state updates
+- Handles local UI (tooltips, prediction market bets)
+
+### 8.4 Game State Model (Redis)
+
+```json
+{
+  "matchId": "match_abc123",
+  "status": "IN_PROGRESS",
+  "mode": "2P",
+  "winTarget": 3000,
+  "currentTurn": "player_1",
+  "turnNumber": 14,
+  "turnTimerExpiry": 1713290400000,
+  "stakingPool": 450,
+  "luckyCardDeck": [3, 7, 1, 5, 0, 2, 6, 4],
+  "luckyCardIndex": 2,
+  "players": {
+    "player_1": {
+      "id": "usr_xyz",
+      "walletAddress": "7xKQ...3mPn",
+      "position": 12,
+      "cash": 620,
+      "netWorth": 1870,
+      "properties": [2, 3, 5, 6, 11],
+      "buildings": { "2": 1, "3": 2, "5": 0, "6": 1, "11": 0 },
+      "inJail": false,
+      "jailTurnsLeft": 0,
+      "afkStrikes": 0,
+      "isBankrupt": false
+    },
+    "player_2": {
+      "id": "usr_abc",
+      "walletAddress": "9pRz...4kWq",
+      "position": 24,
+      "cash": 340,
+      "netWorth": 1490,
+      "properties": [9, 10, 13, 14],
+      "buildings": { "9": 0, "10": 0, "13": 1, "14": 1 },
+      "inJail": false,
+      "jailTurnsLeft": 0,
+      "afkStrikes": 1,
+      "isBankrupt": false
+    }
+  },
+  "propertyState": {
+    "2": { "owner": "player_1", "buildings": 1 },
+    "3": { "owner": "player_1", "buildings": 2 },
+    "9": { "owner": "player_2", "buildings": 0 }
+  },
+  "predictionBets": [],
+  "turnLog": []
+}
+```
+
+### 8.5 WebSocket Event Protocol
+
+#### Client → Server (Player Intents)
+
+| Event | Payload | When |
+|---|---|---|
+| `roll_dice` | `{}` | Start of player's turn |
+| `buy_property` | `{ spaceId: 13 }` | After landing on unowned property |
+| `build` | `{ spaceId: 5, count: 1 }` | During turn, if monopoly owned |
+| `bail_out` | `{}` | When in Audit, choosing to pay |
+| `place_bet` | `{ type: "color", tier: "red" }` | During opponent's turn (prediction) |
+| `initiate_trade` | `{ targetPlayer: "player_2", offer: {...} }` | During turn ($60 fee) |
+| `respond_trade` | `{ accept: true }` | When receiving a trade offer |
+| `sell_to_bank` | `{ spaceId: 9 }` | Liquidating a property (80% value) |
+
+#### Server → Client (State Updates)
+
+| Event | Payload | Trigger |
+|---|---|---|
+| `dice_result` | `{ dice: [4, 3], newPosition: 19 }` | After `roll_dice` validated |
+| `state_update` | `{ ...full game state diff }` | After every action |
+| `rent_payment` | `{ payer, receiver, amount, spaceId }` | Landing on owned property |
+| `net_worth_update` | `{ player_1: 1870, player_2: 1490 }` | After any economic change |
+| `staking_pool_update` | `{ newTotal: 450 }` | After pool inflow/outflow |
+| `lucky_card` | `{ cardId: 3, effect: {...} }` | Landing on Lucky Card corner |
+| `prediction_result` | `{ won: true, payout: 175 }` | After dice rolled (bet resolution) |
+| `player_bankrupt` | `{ playerId: "player_2" }` | Net Worth ≤ 0 |
+| `game_over` | `{ winner, reason, finalNetWorth }` | Win condition triggered |
+| `trade_proposal` | `{ from, offer, timer: 15 }` | OTC trade initiated |
+| `turn_start` | `{ playerId, turnNumber, timer: 45 }` | Turn rotation |
+
+### 8.6 Solana Smart Contract Architecture
+
+```mermaid
+sequenceDiagram
+    participant P1 as Player 1 (Privy Wallet)
+    participant P2 as Player 2 (Privy Wallet)
+    participant UI as Game Client
+    participant GS as Game Server
+    participant SC as Escrow Program (Solana)
+
+    Note over P1,P2: MATCH CREATION
+    P1->>UI: Click "Find Match"
+    UI->>GS: Join matchmaking queue
+    GS->>GS: Match P1 with P2
+    GS->>SC: Create escrow PDA for match
+    P1->>SC: Deposit $5 USDC
+    P2->>SC: Deposit $5 USDC
+    SC->>GS: Both deposits confirmed
+    GS->>UI: Match starts
+
+    Note over P1,P2: GAMEPLAY (all server-side)
+    loop Every Turn
+        GS->>GS: Validate actions, update state
+        GS->>UI: Broadcast state via WebSocket
+    end
+
+    Note over P1,P2: VICTORY
+    GS->>GS: P1 Net Worth crosses $3,000
+    GS->>GS: Generate signed victory proof (server keypair)
+    GS->>SC: Submit victory proof
+    SC->>SC: Verify server signature
+    SC->>SC: Deduct 10% platform fee ($1.00)
+    SC->>P1: Transfer $9.00 USDC to winner
+    SC->>GS: Confirm payout
+    GS->>UI: Display victory screen
+```
+
+**Escrow Program (Anchor) — Key Instructions:**
+
+| Instruction | Description |
+|---|---|
+| `create_match` | Creates PDA, sets players, prize pool, state = PENDING |
+| `deposit_entry` | Player deposits $5 USDC. After all deposited → state = ACTIVE |
+| `settle_match` | Server submits signed victory proof. Program verifies, transfers funds to winner. |
+| `cancel_match` | If a player disconnects before game starts, refund all deposits. |
+| `timeout_forfeit` | If server reports AFK forfeit, settles in favor of remaining player(s). |
+
+### 8.7 Embedded Wallet (Privy Integration) 🔄
+
+> **Design Decision:** No MetaMask/Phantom popups. Players get an in-app wallet instantly.
+
+**Onboarding Flow:**
+1. Player visits bankroll.gg
+2. Signs up with **email, Google, or Twitter** (Privy handles auth)
+3. Privy auto-generates a **Solana embedded wallet** (keypair stored in secure enclave)
+4. Player sees their wallet address + balance in the game HUD
+5. Player deposits SOL or USDC via on-ramp (Moonpay/Transak integration) or transfers from external wallet
+6. Ready to play — zero Web3 knowledge required
+
+**Supported Chains:**
+- **Primary:** Solana (USDC-SPL for game entry, SOL for gas)
+- **Future:** Base (L2 Ethereum) for EVM users
+
+### 8.8 Matchmaking System
+
+```mermaid
+stateDiagram-v2
+    [*] --> Lobby: Player clicks "Play"
+    Lobby --> Queue_2P: Selects "Head-to-Head"
+    Lobby --> Queue_4P: Selects "Free-for-All"
+    Queue_2P --> Matched: 2 players in queue
+    Queue_4P --> Matched: 4 players in queue
+    Matched --> Escrow: Create escrow + request deposits
+    Escrow --> GameActive: All deposits confirmed
+    Escrow --> Cancelled: Deposit timeout (60s)
+    Cancelled --> [*]: Refund depositors
+    GameActive --> GameOver: Win condition met
+    GameOver --> [*]: Prize distributed
+```
+
+**Initial launch:** Simple FIFO queue (first-come, first-served)
+**Post-launch:** ELO-based skill rating, rank tiers, seasonal leaderboards
+
+### 8.9 Anti-Cheat & Security
+
+| Threat | Mitigation |
+|---|---|
+| Dice manipulation | Server-generated CSPRNG (crypto.randomBytes). Client never generates dice. |
+| Net Worth spoofing | Net Worth computed server-side only. Client displays server value. |
+| Speed hacking (skip turns) | Server enforces turn order. Out-of-turn actions rejected. |
+| Bot accounts | Rate limiting on matchmaking. CAPTCHA on account creation. Progressive reputation system. |
+| Wallet draining | Privy's MPC architecture — no single point of key compromise. |
+| Server impersonation | Escrow program only accepts signed proofs from a registered server keypair. |
+| Replay attacks | Each match has a unique PDA. Victory proofs include match ID + nonce. |
+
+### 8.10 Database Schema (PostgreSQL)
+
+```sql
+-- Core tables
+users (id, email, display_name, wallet_address, created_at, elo_rating)
+matches (id, mode, status, winner_id, prize_pool, escrow_pda, started_at, ended_at)
+match_players (match_id, user_id, starting_cash, final_net_worth, final_position)
+transactions (id, match_id, user_id, type, amount, timestamp)
+
+-- Analytics
+match_events (id, match_id, turn_number, event_type, event_data, timestamp)
+prediction_bets (id, match_id, user_id, bet_type, amount, won, payout, turn_number)
+leaderboards (user_id, season, wins, losses, total_earnings, elo_rating)
+```
+
+### 8.11 Deployment Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                   CLOUDFLARE                     │
+│              (DNS + DDoS Protection)             │
+├──────────────────────┬──────────────────────────┤
+│                      │                          │
+│   ┌──────────────┐   │   ┌──────────────────┐   │
+│   │   Vercel      │   │   │  Railway/Fly.io  │   │
+│   │  (Frontend)   │   │   │  (Game Server)   │   │
+│   │  Next.js SSR  │   │   │  Node.js + WS    │   │
+│   └──────┬───────┘   │   └────────┬─────────┘   │
+│          │           │            │              │
+│          └───────────┼────────────┘              │
+│                      │                          │
+│          ┌───────────┴───────────┐              │
+│          │                       │              │
+│   ┌──────┴──────┐   ┌───────────┴──────┐       │
+│   │  Supabase    │   │    Upstash       │       │
+│   │ (PostgreSQL) │   │    (Redis)       │       │
+│   └──────────────┘   └─────────────────┘       │
+│                                                 │
+│         ┌──────────────────────┐                │
+│         │   Solana Mainnet     │                │
+│         │  (Escrow Programs)   │                │
+│         └──────────────────────┘                │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+## 9. RESOLVED DECISIONS (All Finalized ✅)
+
+| # | Decision | Resolution |
+|---|---|---|
+| 1 | Platform fee | ✅ **10%** of total prize pool. 2P winner gets $9, 4P winner gets $18. |
+| 2 | Property names | ✅ **Themed** — global financial capitals (Lagos → New York, escalating). |
+| 3 | Audio | ✅ **SFX only** — no background music. Keeps tension high. |
+| 4 | Build priority | ✅ **Desktop-first** — responsive mobile layout added in polish phase. |
+| 5 | Testnet | ✅ **Yes** — Solana Devnet with fake USDC for all playtesting. Game built standalone, integrated into website later. |
+| 6 | Spectator mode | ✅ **Yes** — read-only WebSocket connection to watch live matches. |
+| 7 | Match replays | ✅ **No** — not storing replays. Saves storage costs. |
+
+### 9.1 Spectator Mode — Implementation
+
+Spectators connect to the match WebSocket room in **read-only mode**:
+- Receive all `state_update`, `dice_result`, `rent_payment` events
+- Cannot send any game actions
+- See the full board, all player positions, Net Worth, properties
+- Prediction Market and OTC UI are hidden for spectators
+- Player count badge shows: *"2 playing · 5 watching"*
+- Spectator limit: 50 per match (prevent server overload)
+
+---
+
+## 10. DEVELOPMENT PHASES
+
+> [!NOTE]
+> The game is being built as a **standalone module** that will later be integrated into the main website's game slot. No website integration work during these phases.
+
+### Phase 1 — Core Game Engine (Weeks 1-3)
+- Authoritative game server with full rule engine
+- All 28-space board logic with themed property data
+- Complete game state management in Redis
+- WebSocket protocol implementation (including spectator connections)
+- All dice, rent, purchase, building, bankruptcy, OTC, prediction market logic
+- Staking Pool inflow/outflow mechanics
+- Lucky Card deck system
+- Unit tests for every economic formula
+
+### Phase 2 — Frontend Board & UI (Weeks 3-5)
+- Next.js application shell (lobby, matchmaking, game room)
+- PixiJS board renderer (28-space grid with city names, tokens, animations)
+- HUD (cash, net worth, property cards, turn indicator)
+- Prediction Market slide-up UI
+- OTC Trade modal ($60 fee flow)
+- Progressive onboarding system (contextual tooltips)
+- Spectator view (read-only board)
+- Desktop-first responsive layout
+
+### Phase 3 — Blockchain Integration (Weeks 5-7)
+- Anchor escrow program (create, deposit, settle, cancel, with 10% fee logic)
+- Privy embedded wallet integration
+- USDC deposit/withdrawal flow (Solana Devnet)
+- Victory proof signing and verification
+- Platform treasury wallet setup
+
+### Phase 4 — Polish & Testing (Weeks 7-9)
+- All animations (rent payments, bankruptcy shatter, staking pool explosion)
+- SFX implementation (all game events)
+- Mobile responsive layout
+- Security audit (smart contract + game server)
+- Closed beta on Solana Devnet with test USDC
+
+### Phase 5 — Website Integration (Post-Beta)
+- Embed game module into main website game slot
+- Mainnet deployment
+- Matchmaking go-live
+- On-ramp integration (Moonpay/Transak) for real deposits

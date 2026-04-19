@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "bankroll-game",
+  "public": true,
+  "routes": [
+    { "src": "/bankroll/(.*)", "dest": "/bankroll-board/$1" },
+    { "src": "/bankroll", "dest": "/bankroll-board/login.html" },
+    { "src": "/(.*)", "dest": "/bankroll-board/$1" }
+  ]
+}
