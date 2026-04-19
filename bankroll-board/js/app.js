@@ -466,7 +466,7 @@ async function handleCorner(space, playerId) {
       { id: 'jail-stay', label: 'STAY 2 ROUNDS', cls: 'btn--pass-center', value: 'stay' },
     ]);
     if (decision === 'pay') {
-      player.balance -= 150; state.stakingPool += 150; renderHUD();
+      player.balance -= 150; state.stakingPool += Math.round(150 * 0.3); renderHUD();
       await animateCoins(playerId, 'bank', 3);
       await flashCenterEvent(`${player.name} paid $150 to escape Jail.`, 'jail.png', '-$150', 1500);
     } else {
@@ -596,7 +596,7 @@ function onTradeClick() {
   if (player.balance < 60) { flashCenterEvent("Can't afford $60 trade fee!", null, null, 1200); return; }
 
   player.balance -= 60;
-  state.stakingPool += 60;
+  state.stakingPool += Math.round(60 * 0.3); // 30% of trade fee goes to staking pool
   renderHUD();
   animateCoins(ap, 'bank', 2);
 
@@ -849,7 +849,10 @@ function showBettingPanel(bettorId) {
       renderHUD();
       const targetSpace = BOARD.find(s => String(s.id) === value);
       panel.innerHTML = `<div class="bet-panel__header">\uD83C\uDFAF Bet placed: ${targetSpace ? targetSpace.name : value}</div><div class="bet-panel__cost">Waiting for dice roll...</div>`;
-      pushSyncState(); // fire-and-forget, no await
+      // Coin animation for the bettor
+      animateCoins(bettorId, 'bank', 3);
+      // Notify opponent via broadcast (fast path)
+      pushSyncState({ type: 'BET_PLACED', bettor: bettorId, spaceName: targetSpace ? targetSpace.name : value });
     });
   });
 }
@@ -861,25 +864,26 @@ function hideBettingPanel() {
 
 async function resolveBet(diceVal, landedSpace) {
   if (!state.bet.active) return;
+  if (!landedSpace) return; // corner or unknown — auto-lose
   const b = state.bet;
   const bettor = state.players[b.bettor];
   let won = false;
 
-  // The bet looks exactly at the ID of the space they landed on
   if (b.betType === 'space' && String(landedSpace.id) === String(b.betValue)) {
     won = true;
-  } 
+  }
 
   if (won) {
     const payout = 300;
     bettor.balance += payout;
     renderHUD();
-    await flashCenterEvent(`${bettor.name} won the bet!`, null, `+$${payout}`, 1500);
+    await flashCenterEvent(`${bettor.name} won the prediction bet!`, null, `+$${payout}`, 1500);
     await animateCoins('bank', b.bettor, 6);
   } else {
-    state.stakingPool += 150;
+    const poolShare = Math.round(150 * 0.3); // 30% to staking pool
+    state.stakingPool += poolShare;
     renderHUD();
-    await flashCenterEvent(`${bettor.name} lost the bet. $150 → Pool`, null, '-$150', 1200);
+    await flashCenterEvent(`${bettor.name} lost the bet. $${poolShare} \u2192 Pool`, null, '-$150', 1200);
   }
 
   state.bet = { active: false, bettor: null, betType: null, betValue: null };
@@ -947,7 +951,8 @@ async function onRollClick() {
         const decision = await showCenterBuyDecision(landed);
         if (decision === 'buy') {
           player.balance -= landed.price;
-          state.stakingPool += landed.price;
+          const poolContrib = Math.round(landed.price * 0.3); // 30% to staking pool
+          state.stakingPool += poolContrib;
           state.owners[landed.id] = ap;
           updateTileOwnerBand(landed.id, ap);
           renderHUD();
@@ -1509,16 +1514,18 @@ async function playbackRender(payloadState) {
     lastProcessedEventId = ev.id;
     if (ev.type === 'ROLL') {
       // ev.oldPos = pre-roll position, ev.newPos = destination
-      // Do NOT call mergeServerState here — let animateTokenAlongPath handle position
-      // State.players[ev.p].position at this point is already ev.oldPos on P2 (never echoed to P1)
       await animateDice(ev.dice);
-      await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis); // passedGenesis=true means genesis bonus was pre-applied
+      await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis);
     } else if (ev.type === 'BUY') {
       await animateCoins(ev.p, 'bank', 4);
       await flashCenterEvent(`${payloadState.players[ev.p]?.name} bought ${ev.landed.name}!`, ev.landed.image, `$${ev.landed.price}`, 1500);
     } else if (ev.type === 'RENT') {
       await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
       await flashCenterEvent(`${payloadState.players[ev.p]?.name} paid $${ev.rent} rent`, ev.landed.image, `-$${ev.rent}`, 1500);
+    } else if (ev.type === 'BET_PLACED') {
+      // Opponent placed a bet — show notification to the rolling player
+      const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
+      await flashCenterEvent(`\uD83C\uDFAF ${bettorName} bet on ${ev.spaceName}!`, null, '$150', 1200);
     }
   }
 
@@ -1656,8 +1663,13 @@ async function init() {
         flashCenterEvent(`${state.players[ev.p]?.name || 'Opponent'} collected $200!`, null, '+$200', 1200);
         animateCoins('bank', ev.p, 5);
       }
+    } else if (ev.type === 'BET_PLACED') {
+      // Fast notification: opponent placed a bet on us — show immediately via broadcast
+      const bettorName = state.players?.[ev.bettor]?.name || 'Opponent';
+      animateCoins(ev.bettor, 'bank', 3); // show their coin drain on our screen
+      flashCenterEvent(`\uD83C\uDFAF ${bettorName} placed a bet on ${ev.spaceName}!`, null, '-$150', 1200);
     }
-    // BUY/RENT come via postgres_changes full state — no broadcast handling needed
+    // BUY/RENT come via postgres_changes full state
   });
 
   // SLOW PATH: postgres_changes — arrives after Edge Function persists state (~1-5s)
