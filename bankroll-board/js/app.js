@@ -126,13 +126,25 @@ const LUCKY_CARDS = [
       for (const pid of ['p1','p2']) { s.players[pid].balance -= 100; s.stakingPool += 100; }
       return { amount: -100, from: 'all', to: 'bank', text: 'All players pay $100 → Staking Pool!' };
     }},
-  { name: 'Ecosystem Migration',   text: 'Move to any unowned Utility and buy it!', type: 'chaos',
+  { name: 'Ecosystem Migration',   text: 'Machine assigns you a random Utility!', type: 'chaos',
     execute(p, s) {
       const freeUtils = BOARD.filter(sp => sp.type === 'utility' && !s.owners[sp.id]);
       if (freeUtils.length > 0) {
-        return { amount: 0, text: `Choose a free Utility to move to!`, chooseUtil: freeUtils };
+        // Machine picks a random free utility — no player choice
+        const target = freeUtils[Math.floor(Math.random() * freeUtils.length)];
+        return { amount: 0, text: `Teleporting to ${target.name}!`, teleport: target };
       }
-      return { amount: 0, text: 'All Utilities owned. Pay rent to nearest owner!', noUtil: true };
+      // All utilities owned: pay rent to a random owned utility
+      const ownedUtils = BOARD.filter(sp => sp.type === 'utility' && s.owners[sp.id]);
+      if (ownedUtils.length > 0) {
+        const util = ownedUtils[Math.floor(Math.random() * ownedUtils.length)];
+        const owner = s.owners[util.id];
+        const rent = 40;
+        s.players[p].balance -= rent;
+        s.players[owner].balance += rent;
+        return { amount: -rent, from: p, to: owner, text: `All utilities owned! Paid $${rent} rent to ${s.players[owner].name}.` };
+      }
+      return { amount: 0, text: 'No utilities on the board.' };
     }},
 ];
 let luckyDeck = [...Array(LUCKY_CARDS.length).keys()];
@@ -277,7 +289,8 @@ function updateBuildingIcons(spaceId) {
   const el = document.getElementById(`bld-${spaceId}`);
   if (!el) return;
   const count = state.buildings[spaceId] || 0;
-  el.textContent = count > 0 ? '🏠'.repeat(count) : '';
+  // Fix 17: use compact format instead of repeating emoji — prevents tile overflow
+  el.textContent = count > 0 ? `\u00D7${count} \uD83C\uDFE0` : '';
 }
 
 
@@ -407,6 +420,8 @@ function showCenterDecision(text, imageSrc, buttons) {
 }
 function showCenterBuyDecision(space) {
   return new Promise(resolve => {
+    // Fix 3: ensure any open property overlay is hidden so it doesn't ghost behind this prompt
+    if (overlayEl?.classList.contains('overlay--active')) hidePropertyCard();
     // Cancel any pending flash so it doesn't wipe the decision prompt
     if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
     showCenterEvent(space.name, space.image, `$${space.price}`);
@@ -448,11 +463,48 @@ async function handleCorner(space, playerId) {
       removeStaticToken(playerId);
       placeStaticToken(playerId);
       await flashCenterEvent(card.name + ': ' + displayText, 'luckycard.png', null, 2500);
+    } else if (result.teleport) {
+      // Fix 1: Machine-assigned utility — animate player there, then handle buy/rent
+      const target = result.teleport;
+      await flashCenterEvent(`${card.name}: ${displayText}`, 'luckycard.png', null, 1800);
+      const steps = ((target.id - player.position) + 28) % 28 || 28;
+      const passedGenesis = (player.position + steps) > 28;
+      await animateTokenAlongPath(playerId, player.position, steps, passedGenesis);
+      if (passedGenesis) { player.balance += 200; renderHUD(); }
+      if (!state.owners[target.id]) {
+        if (player.balance >= target.price) {
+          const decision = await showCenterBuyDecision(target);
+          if (decision === 'buy') {
+            player.balance -= target.price;
+            state.stakingPool += Math.round(target.price * 0.3);
+            state.owners[target.id] = playerId;
+            updateTileOwnerBand(target.id, playerId);
+            renderHUD();
+            await animateCoins(playerId, 'bank', 3);
+            const newRent = calculateRent(target);
+            await flashCenterEvent(`${player.name} bought ${target.name}!`, null, `Rent: $${newRent}`, 1500);
+            pushSyncState({ type: 'BUY', p: playerId, landed: target, newRent });
+          } else { showCenterIdle(); }
+        } else {
+          await flashCenterEvent(`${player.name} can't afford ${target.name}!`, null, null, 1200);
+        }
+      } else if (state.owners[target.id] !== playerId) {
+        const rent = calculateRent(target);
+        const owner = state.owners[target.id];
+        player.balance -= rent;
+        state.players[owner].balance += rent;
+        renderHUD();
+        await animateCoins(playerId, owner, 3);
+        await flashCenterEvent(`${player.name} paid $${rent} rent!`, null, `-$${rent}`, 1500);
+        pushSyncState({ type: 'RENT', p: playerId, owner, rent, landed: target });
+      } else { showCenterIdle(); }
     } else {
       await flashCenterEvent(card.name + ': ' + displayText, 'luckycard.png', result.amount !== 0 ? `${result.amount > 0 ? '+' : ''}$${result.amount}` : null, 2500);
       if (result.amount > 0) await animateCoins(result.from, result.to, Math.min(Math.ceil(Math.abs(result.amount) / 50), 8));
       else if (result.amount < 0) await animateCoins(result.from, result.to, Math.min(Math.ceil(Math.abs(result.amount) / 50), 6));
     }
+    // Broadcast lucky card draw so P2 sees notification
+    pushSyncState({ type: 'LUCKY', p: playerId, cardName: card.name, cardText: displayText, amount: result.amount ?? 0 });
     checkBankruptcy(playerId);
     checkWin();
   }
@@ -470,23 +522,19 @@ async function handleCorner(space, playerId) {
       renderHUD();
       await flashCenterEvent(`${player.name} won ${pctDisplay}% of the Staking Pool!`, 'centralpool.png', `+$${payout}`, 2500);
       await animateCoins('bank', playerId, Math.min(Math.ceil(payout / 50), 10));
+      // Fix 8: broadcast STAKING_WIN so P2 sees the jackpot
+      pushSyncState({ type: 'STAKING_WIN', p: playerId, payout, pct: pctDisplay });
       checkWin();
     }
   }
 
   else if (space.subtype === 'jail') {
-    const decision = await showCenterDecision('JAIL! Pay $150 to leave or stay locked for 2 rounds.', 'jail.png', [
-      { id: 'jail-pay', label: 'PAY $150', cls: 'btn--buy-center', value: 'pay' },
-      { id: 'jail-stay', label: 'STAY 2 ROUNDS', cls: 'btn--pass-center', value: 'stay' },
-    ]);
-    if (decision === 'pay') {
-      player.balance -= 150; state.stakingPool += Math.round(150 * 0.3); renderHUD();
-      await animateCoins(playerId, 'bank', 3);
-      await flashCenterEvent(`${player.name} paid $150 to escape Jail.`, 'jail.png', '-$150', 1500);
-    } else {
-      player.jailTurns = 2; renderHUD();
-      await flashCenterEvent(`${player.name} is locked in Jail for 2 rounds!`, 'jail.png', '🔒 2 Turns', 1800);
-    }
+    // Fix 6: Landing on jail sets jailTurns only — the pay/serve decision
+    // happens at the START of the jailed player's NEXT turn in onRollClick
+    player.jailTurns = 2;
+    renderHUD();
+    await flashCenterEvent(`${player.name} is going to Jail!`, 'jail.png', '\uD83D\uDD12 2 Turns', 1800);
+    pushSyncState({ type: 'JAIL_SENT', p: playerId });
     checkBankruptcy(playerId);
   }
 }
@@ -738,6 +786,13 @@ function onTradePropose() {
   const opp = t.proposer === 'p1' ? 'p2' : 'p1';
   startTradePulse(opp);
   showTradePanel(opp, 'counter');
+  // Broadcast to P2 so they see the counter panel
+  pushSyncState({
+    type: 'TRADE_PROPOSED',
+    proposer: t.proposer,
+    offerProps: t.offerProps,
+    offerCash: t.offerCash
+  });
 }
 
 function onTradeConfirm() {
@@ -747,6 +802,15 @@ function onTradeConfirm() {
   stopAllPulse();
   t.step = 'review';
   showTradePanel(t.proposer, 'review');
+  // Broadcast to P1 so they see the final review panel
+  pushSyncState({
+    type: 'TRADE_COUNTERED',
+    proposer: t.proposer,
+    offerProps: t.offerProps,
+    offerCash: t.offerCash,
+    counterProps: t.counterProps,
+    counterCash: t.counterCash
+  });
 }
 
 async function executeTrade() {
@@ -774,12 +838,24 @@ async function executeTrade() {
   if (t.counterCash > 0) await animateCoins(opp, t.proposer, Math.min(Math.ceil(t.counterCash / 80), 5));
 
   await flashCenterEvent('Trade completed!', null, '🤝', 1500);
+
+  // Broadcast BEFORE closing — remote side needs event data to animate
+  pushSyncState({
+    type: 'TRADE_EXECUTED',
+    proposer: t.proposer,
+    offerProps: t.offerProps,
+    counterProps: t.counterProps,
+    offerCash: t.offerCash,
+    counterCash: t.counterCash
+  });
+
   closeTrade();
-  pushSyncState();
   checkWin();
 }
 
 function cancelTrade() {
+  // Broadcast cancellation so P2's overlay also closes
+  pushSyncState({ type: 'TRADE_CANCELLED' });
   flashCenterEvent('Trade cancelled.', null, null, 800);
   closeTrade();
 }
@@ -888,11 +964,20 @@ function hideBettingPanel() {
 
 async function resolveBet(diceVal, landedSpace) {
   if (!state.bet.active) return;
-  if (!landedSpace) return; // corner or unknown — auto-lose
   const b = state.bet;
   const bettor = state.players[b.bettor];
-  let won = false;
 
+  // Fix 10: Corner landing = auto-lose. Previously returned early without clearing state.bet.
+  if (!landedSpace || landedSpace.type === 'corner') {
+    const poolShare = Math.round(150 * 0.3);
+    state.stakingPool += poolShare;
+    renderHUD();
+    await flashCenterEvent(`${bettor.name} bet missed (corner)! $${poolShare} \u2192 Pool`, null, '-$150', 1200);
+    state.bet = { active: false, bettor: null, betType: null, betValue: null };
+    return;
+  }
+
+  let won = false;
   if (b.betType === 'space' && String(landedSpace.id) === String(b.betValue)) {
     won = true;
   }
@@ -904,7 +989,7 @@ async function resolveBet(diceVal, landedSpace) {
     await flashCenterEvent(`${bettor.name} won the prediction bet!`, null, `+$${payout}`, 1500);
     await animateCoins('bank', b.bettor, 6);
   } else {
-    const poolShare = Math.round(150 * 0.3); // 30% to staking pool
+    const poolShare = Math.round(150 * 0.3); // 30% to staking pool, 70% removed (intentional)
     state.stakingPool += poolShare;
     renderHUD();
     await flashCenterEvent(`${bettor.name} lost the bet. $${poolShare} \u2192 Pool`, null, '-$150', 1200);
@@ -929,8 +1014,34 @@ async function onRollClick() {
   const player = state.players[ap];
 
   if (player.jailTurns > 0) {
-    player.jailTurns--;
-    await flashCenterEvent(`${player.name} is in Jail. ${player.jailTurns > 0 ? player.jailTurns + ' round(s) left.' : 'Released next turn!'}`, 'audit.png', '\uD83D\uDD12', 1800);
+    // Fix 6: Broadcast ghost turn so P2 sees the jailed player's turn appear for 2s
+    pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: player.jailTurns });
+
+    // Offer the jailed player a choice: PAY $150 to exit, or serve their turn
+    const decision = await showCenterDecision(
+      `\uD83D\uDD12 You are in Jail! ${player.jailTurns} turn(s) remaining. Pay $150 now to escape?`,
+      'jail.png',
+      [
+        { id: 'jail-pay', label: 'PAY $150 \u2014 EXIT NOW', cls: 'btn--buy-center', value: 'pay' },
+        { id: 'jail-stay', label: 'SERVE TURN', cls: 'btn--pass-center', value: 'stay' }
+      ]
+    );
+    if (decision === 'pay' && player.balance >= 150) {
+      player.balance -= 150;
+      state.stakingPool += Math.round(150 * 0.3);
+      player.jailTurns = 0;
+      renderHUD();
+      await animateCoins(ap, 'bank', 3);
+      await flashCenterEvent(`${player.name} paid $150 and is free!`, 'jail.png', '-$150', 1500);
+      pushSyncState({ type: 'JAIL_EXIT', p: ap });
+    } else {
+      // Can't afford or chose to stay — decrement the counter and show message
+      player.jailTurns--;
+      await flashCenterEvent(
+        `${player.name} serves their sentence. ${player.jailTurns > 0 ? player.jailTurns + ' turn(s) left.' : 'Released next turn!'}`,
+        'jail.png', '\uD83D\uDD12', 1800
+      );
+    }
     state.rolling = false;
     switchTurn(null);
     return;
@@ -972,7 +1083,7 @@ async function onRollClick() {
 
   resumeTurnTimer();
   const landed = BOARD.find(s => s.id === newPos);
-  await resolveBet(d1, landed);
+  // resolveBet moved below buy/rent block (Fix 12) so bet notification doesn't overwrite buy/rent
 
   let finalEvent = null;
 
@@ -1018,6 +1129,9 @@ async function onRollClick() {
       finalEvent = { type: 'RENT', p: ap, owner, rent: rentOwed, landed };
     } else { showCenterIdle(); }
   }
+
+  // Fix 12: resolve bet AFTER buy/rent so notifications don't overwrite each other
+  await resolveBet(d1, landed);
 
   state.rolling = false;
   switchTurn(finalEvent); // fire-and-forget internally
@@ -1068,17 +1182,36 @@ function onTileClick(space) {
 function showPropertyCard(space) {
   if (!overlayEl || !cardEl) return;
   hideTooltip();
+  // If overlay is already open, hide it first and wait 2 paint frames before
+  // populating new data — prevents the old card from flashing through during CSS transition
+  if (overlayEl.classList.contains('overlay--active')) {
+    overlayEl.classList.remove('overlay--active');
+    requestAnimationFrame(() => requestAnimationFrame(() => _populateAndShowCard(space)));
+    return;
+  }
+  _populateAndShowCard(space);
+}
+
+function _populateAndShowCard(space) {
   cardEl.querySelector('.property-card__image').src = IMG + space.image;
   const ownerKey = state.owners[space.id];
   const color = ownerKey ? PLAYER_COLORS[ownerKey] : space.type === 'city' ? TIERS[space.tier].color : '#78909C';
   cardEl.querySelector('.property-card__hero').style.borderTop = `3px solid ${color}`;
   cardEl.querySelector('.property-card__name').textContent = space.name;
   cardEl.querySelector('.property-card__tier').textContent = space.type === 'city' ? `Tier ${space.tier} — ${TIERS[space.tier].label}` : 'Utility';
-  cardEl.querySelector('.property-card__price-value').textContent = `$${space.price}`;
+
+  // Fix 9: Show 'Current Rent' on owned tiles, 'Buy Price' on unowned
+  if (ownerKey) {
+    cardEl.querySelector('.property-card__price-label').textContent = 'Current Rent';
+    cardEl.querySelector('.property-card__price-value').textContent = `$${calculateRent(space)}`;
+  } else {
+    cardEl.querySelector('.property-card__price-label').textContent = 'Buy Price';
+    cardEl.querySelector('.property-card__price-value').textContent = `$${space.price}`;
+  }
 
   const table = cardEl.querySelector('.property-card__rent-table');
   table.innerHTML = '';
-  getRentTable(space).forEach((r, i) => {
+  getRentTable(space).forEach((r) => {
     const row = document.createElement('div');
     row.className = 'rent-row';
     const currentRent = calculateRent(space);
@@ -1111,10 +1244,9 @@ function showPropertyCard(space) {
 
   const onPass = () => { hidePropertyCard(); cleanup(); };
   const onSell = () => {
-    if (state.turn !== ownerKey) return; // Can only sell on your turn
+    if (state.turn !== ownerKey) return;
     const sellPrice = Math.round(space.price * 0.8);
     state.players[state.turn].balance += sellPrice;
-    // Sell buildings too
     const bCost = TIER_ECONOMY[space.tier]?.bCost || 0;
     const bCount = state.buildings[space.id] || 0;
     state.players[state.turn].balance += Math.round(bCost * bCount * 0.8);
@@ -1124,18 +1256,20 @@ function showPropertyCard(space) {
     delete state.owners[space.id];
     animateCoins('bank', state.turn, 3);
     renderHUD(); hidePropertyCard(); cleanup();
-    pushSyncState();
+    // Fix 4: broadcast SELL so P2 sees animation + notification immediately
+    pushSyncState({ type: 'SELL', p: state.turn, spaceId: space.id, salePrice: sellPrice });
   };
   const onBuild = () => {
-    if (state.turn !== ownerKey) return; // Only on your turn
+    if (state.turn !== ownerKey) return;
     const cost = TIER_ECONOMY[space.tier]?.bCost || 0;
     if (state.players[ownerKey].balance < cost) return;
     state.players[ownerKey].balance -= cost;
     state.buildings[space.id] = (state.buildings[space.id] || 0) + 1;
     updateBuildingIcons(space.id);
     renderHUD();
-    showPropertyCard(space); // Refresh card
-    pushSyncState();
+    showPropertyCard(space); // Refresh card (flicker-safe via double rAF)
+    // Fix 5: broadcast BUILD so P2 sees building icon immediately
+    pushSyncState({ type: 'BUILD', p: ownerKey, spaceId: space.id, count: state.buildings[space.id] });
     checkWin();
   };
   function cleanup() { passBtn?.removeEventListener('click', onPass); sellBtn?.removeEventListener('click', onSell); buildBtn?.removeEventListener('click', onBuild); }
@@ -1163,7 +1297,8 @@ function setupPopupClose() {
 function renderHUD() {
   renderPlayerCard('player1-hud', state.players.p1, 'p1');
   renderPlayerCard('player2-hud', state.players.p2, 'p2');
-  updateTimerUI();
+  // Fix 14: do NOT call updateTimerUI here — the timer updates via its own setInterval.
+  // Calling it here caused a full DOM rebuild on every timer tick (once per second).
   updateStakingPoolDisplay();
 }
 
@@ -1235,7 +1370,8 @@ function switchTurn(finalEvent = null) {
   renderHUD();
   hideBettingPanel();
   const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
-  if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150) {
+  // Fix 11: only open betting panel when no bet is already active
+  if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150 && !state.bet?.active) {
     showBettingPanel(waitingPlayer);
   }
 }
@@ -1405,8 +1541,9 @@ function handleTurnTimeout() {
   }
 
   // Auto-roll for AFK player (strikes 1 and 2)
+  // Fix 13: guard against rolling when already mid-animation
   flashCenterEvent(`${state.players[localId].name} is AFK! Auto-rolling... (${strikes}/2)`, null, '\u23F0', 800).then(() => {
-    onRollClick();
+    if (!state.rolling && !state.gameOver) onRollClick();
   });
 }
 
@@ -1463,13 +1600,13 @@ function handleChatSend() {
   pushChatMessage(senderId, text);
   input.value = '';
 
-  // Broadcast to Realtime channel instead of just local injection
-  if (roomCode) {
-    try {
-      window.supabase.channel(`public:games:${roomCode}`).send({
-        type: 'broadcast', event: 'chat', payload: { sender: senderId, text }
-      });
-    } catch(e) {}
+  // Broadcast via the shared game channel (same one the realtime listener uses)
+  if (channel) {
+    channel.send({
+      type: 'broadcast',
+      event: 'chat',
+      payload: { sender: senderId, text }
+    }).catch(() => {});
   }
 }
 
@@ -1479,7 +1616,7 @@ function pushChatMessage(senderId, text) {
   const logEl = document.getElementById('chat-log');
   if (logEl) {
     const msgEl = document.createElement('div');
-    const isMe = senderId === state.turn;
+    const isMe = senderId === localId; // use localId, not turn — player can chat when it's not their turn
     msgEl.className = `chat-message chat-message--${senderId} ${isMe ? 'chat-message--right' : ''}`;
     msgEl.innerHTML = `<strong>${state.players[senderId].name}:</strong> ${text}`;
     logEl.appendChild(msgEl);
@@ -1638,6 +1775,81 @@ async function _playbackImpl(payloadState) {
       const winner = ev.kicked === 'p1' ? 'p2' : 'p1';
       showVictory(winner);
       return;
+    } else if (ev.type === 'TRADE_PROPOSED') {
+      // Merge trade state and open counter panel on P2's side
+      state.trade = {
+        active: true, proposer: ev.proposer, step: 'counter',
+        offerProps: ev.offerProps, offerCash: ev.offerCash,
+        counterProps: [], counterCash: 0, timer: null, timeLeft: 40
+      };
+      const opp = ev.proposer === 'p1' ? 'p2' : 'p1';
+      if (localId === opp) {
+        startTradePulse(opp);
+        showTradePanel(opp, 'counter');
+        startTradeTimer();
+      }
+    } else if (ev.type === 'TRADE_COUNTERED') {
+      // Merge trade state and open review panel on P1's (proposer's) side
+      state.trade = {
+        active: true, proposer: ev.proposer, step: 'review',
+        offerProps: ev.offerProps, offerCash: ev.offerCash,
+        counterProps: ev.counterProps, counterCash: ev.counterCash,
+        timer: null, timeLeft: 40
+      };
+      if (localId === ev.proposer) {
+        stopAllPulse();
+        showTradePanel(ev.proposer, 'review');
+        startTradeTimer();
+      }
+    } else if (ev.type === 'TRADE_EXECUTED') {
+      // Apply trade visually on the remote player's board
+      const opp2 = ev.proposer === 'p1' ? 'p2' : 'p1';
+      ev.offerProps.forEach(sid => updateTileOwnerBand(sid, opp2));
+      ev.counterProps.forEach(sid => updateTileOwnerBand(sid, ev.proposer));
+      if (ev.offerCash > 0) await animateCoins(ev.proposer, opp2, Math.min(Math.ceil(ev.offerCash / 80), 5));
+      if (ev.counterCash > 0) await animateCoins(opp2, ev.proposer, Math.min(Math.ceil(ev.counterCash / 80), 5));
+      await flashCenterEvent('\uD83E\uDD1D Trade completed!', null, '\u2705', 1500);
+      closeTrade();
+    } else if (ev.type === 'TRADE_CANCELLED') {
+      await flashCenterEvent('Trade cancelled.', null, '\u274C', 800);
+      closeTrade();
+    } else if (ev.type === 'SELL') {
+      // Fix 4: remote player sees sell animation + notification
+      const sp = BOARD.find(s => s.id === ev.spaceId);
+      const sellerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      await animateCoins('bank', ev.p, 2);
+      await flashCenterEvent(`${sellerName} sold ${sp?.name || 'a property'}!`, null, `+$${ev.salePrice}`, 1200);
+    } else if (ev.type === 'BUILD') {
+      // Fix 5: remote player sees building icon + notification
+      updateBuildingIcons(ev.spaceId);
+      updateTileOwnerBand(ev.spaceId, ev.p);
+      const builderName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      const sp2 = BOARD.find(s => s.id === ev.spaceId);
+      await flashCenterEvent(`\uD83C\uDFD7\uFE0F ${builderName} built on ${sp2?.name}!`, null, `\u00D7${ev.count} \uD83C\uDFE0`, 1200);
+    } else if (ev.type === 'LUCKY') {
+      // Fix 1: remote player sees lucky card draw notification
+      const playerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      const sign = ev.amount > 0 ? '+' : '';
+      await flashCenterEvent(
+        `\uD83C\uDCCF ${playerName} drew: ${ev.cardName}`, null,
+        ev.amount !== 0 ? `${sign}$${ev.amount}` : ev.cardText, 2000
+      );
+    } else if (ev.type === 'STAKING_WIN') {
+      // Fix 8: remote player sees jackpot win
+      const name = payloadState.players?.[ev.p]?.name || 'Opponent';
+      await animateCoins('bank', ev.p, Math.min(Math.ceil(ev.payout / 50), 10));
+      await flashCenterEvent(`\uD83D\uDCB0 ${name} won ${ev.pct}% of the Staking Pool!`, null, `+$${ev.payout}`, 2000);
+    } else if (ev.type === 'JAIL_TURN') {
+      // Fix 6: show ghost turn notification on opponent's screen
+      const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      await flashCenterEvent(`\uD83D\uDD12 ${pName} is in Jail \u2014 ${ev.turnsLeft} turn(s) left`, null, '\u23ED\uFE0F Skipped', 2000);
+    } else if (ev.type === 'JAIL_EXIT') {
+      const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      await animateCoins(ev.p, 'bank', 3);
+      await flashCenterEvent(`${pName} paid $150 and escaped Jail!`, null, '-$150', 1500);
+    } else if (ev.type === 'JAIL_SENT') {
+      const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
+      await flashCenterEvent(`${pName} was sent to Jail!`, null, '\uD83D\uDD12', 1500);
     }
   }
 
@@ -1817,5 +2029,12 @@ async function init() {
     console.log(`[realtime] channel status: ${status}`);
   });
 }
+
+// Fix 18: Clean up timers and Supabase channel on page unload — prevents memory/subscription leaks
+window.addEventListener('beforeunload', () => {
+  clearInterval(turnTimerInterval);
+  if (state.trade?.timer) clearInterval(state.trade.timer);
+  channel?.unsubscribe().catch(() => {});
+});
 
 init();

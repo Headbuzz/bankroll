@@ -245,9 +245,14 @@ body {
 .tile__price {
   color: #FFF;
   font-family: var(--font-body);
-  font-weight: 800;
-  font-size: 13px;
+  font-weight: 700;
+  font-size: 10px; /* reduced from 13px — prevents overflow on 'Rent $XX' text */
   text-shadow: 0 1px 2px rgba(0,0,0,.25);
+  text-align: center;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Body — tier color, name in white */
