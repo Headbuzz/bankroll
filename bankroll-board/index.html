@@ -11,6 +11,12 @@
   <link href="css/styles.css?v=16" rel="stylesheet"/>
 </head>
 <body>
+  <!-- Auth Guard: Ensure player belongs in a room -->
+  <script>
+    if (!sessionStorage.getItem('bankroll_room')) {
+      window.location.replace('login.html');
+    }
+  </script>
 
   <!-- Notifications -->
   <div id="chat-toast" class="chat-toast"></div>
