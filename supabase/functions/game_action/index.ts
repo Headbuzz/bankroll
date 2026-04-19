@@ -211,19 +211,101 @@ Deno.serve(async (req: Request) => {
     if (!mySlot) return json({ error: 'You are not a player in this game' }, 403);
 
     // ══════════════════════════════════════════════════════════
-    // ACTION: roll
+    // ACTION: roll (Event-Sourced)
     // ══════════════════════════════════════════════════════════
     if (action === 'roll') {
       if (game.state.turn !== mySlot) return json({ error: 'Not your turn' }, 403);
       if (game.state.phase !== 'idle') return json({ error: 'Cannot roll right now' }, 400);
 
-      const diceVal = roll();
-      const newState = { ...game.state, lastDice: diceVal, phase: 'rolling' };
+      const d1 = roll(); const d2 = roll();
+      const diceTotal = d1 + d2;
+      const player = game.state.players[mySlot];
+      let pos = player.position;
+      const path = [];
+      let passedGenesis = false;
+
+      // Handle jail? For now just allow roll if they are out of jail or we skip it for prototyping.
+      if (player.jailTurns > 0) {
+        player.jailTurns--;
+        // For simplicity, just decrement and let them roll if they escape? Or they skip.
+      }
+
+      for (let i = 0; i < diceTotal; i++) {
+        pos++;
+        if (pos > 28) {
+          pos = 1;
+          passedGenesis = true;
+        }
+        path.push(pos);
+      }
+
+      player.position = pos;
+      if (passedGenesis) {
+        player.balance += 200;
+      }
+
+      const newState = { 
+        ...game.state, 
+        phase: 'action', 
+        players: { ...game.state.players, [mySlot]: player },
+        last_event: { type: 'ROLL', player: mySlot, dice: [d1, d2], path, passedGenesis, landingPosition: pos }
+      };
 
       const { error: err } = await db.from('games').update({ state: newState }).eq('room_code', room_code);
       if (err) throw new Error(err.message);
 
-      return json({ ok: true, dice: diceVal, state: newState });
+      return json({ ok: true, state: newState });
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // ACTION: state_sync (Client pushes clean domain state)
+    // FIX D: Optimistic Concurrency Control — reject stale writes atomically
+    // ══════════════════════════════════════════════════════════
+    if (action === 'state_sync') {
+      const { new_state, client_version } = body as any;
+
+      if (typeof client_version !== 'number') {
+        return json({ error: 'client_version is required' }, 400);
+      }
+
+      // Atomic conditional update: only succeeds if version hasn't changed
+      const { data, error: err } = await db
+        .from('games')
+        .update({ state: new_state, version: game.version + 1 })
+        .eq('id', game.id)
+        .eq('version', client_version)
+        .select('version')
+        .maybeSingle();
+
+      if (err) throw new Error(err.message);
+
+      if (!data) {
+        // Another write beat us — tell the client to re-fetch
+        console.warn(`[state_sync] OCC conflict for room ${room_code}. client_version=${client_version}, db_version=${game.version}`);
+        return json({ ok: false, conflict: true, current_version: game.version }, 409);
+      }
+
+      return json({ ok: true, version: data.version });
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // ACTION: end_turn
+    // ══════════════════════════════════════════════════════════
+    if (action === 'end_turn') {
+      if (game.state.turn !== mySlot) return json({ error: 'Not your turn' }, 403);
+      const nextSlot = mySlot === 'p1' ? 'p2' : 'p1';
+      
+      const newState = {
+        ...game.state,
+        turn: nextSlot,
+        phase: 'idle',
+        last_event: { type: 'END_TURN', player: mySlot, next: nextSlot }
+      };
+
+      const { error: err } = await db.from('games').update({ state: newState }).eq('room_code', room_code);
+      if (err) throw new Error(err.message);
+
+      return json({ ok: true, state: newState });
     }
 
     return json({ error: `Unknown action: ${action}` }, 400);

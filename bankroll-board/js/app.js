@@ -6,6 +6,14 @@
 
 'use strict';
 
+import { supabase, getUser } from './supabase.js';
+
+let roomCode = sessionStorage.getItem('bankroll_room');
+let localId = null;
+let lastProcessedEventId = null;
+let gameId = null;        // UUID primary key for Realtime filter (Fix C)
+let gameVersion = 0;      // OCC sequence counter (Fix D)
+
 const IMG = 'assets/images/';
 
 const SFX_DICE = new Audio('assets/sounds/dice.mp3');
@@ -133,7 +141,7 @@ function drawLuckyCard() { if (luckyIndex >= luckyDeck.length) shuffleDeck(); re
 shuffleDeck();
 
 /* ── Game State ── */
-const state = {
+let state = {
   turn: 'p1',
   phase: 'idle', // idle | rolling | trading | betting
   players: {
@@ -741,6 +749,7 @@ async function executeTrade() {
 
   await flashCenterEvent('Trade completed!', null, '🤝', 1500);
   closeTrade();
+  pushSyncState();
   checkWin();
 }
 
@@ -794,6 +803,8 @@ function getReachableTiers(fromPos) {
 }
 
 function showBettingPanel(bettorId) {
+  if (bettorId !== localId) return; // Only show on the actual bettor's screen
+
   const panel = document.getElementById('betting-panel');
   if (!panel) return;
   const opponent = bettorId === 'p1' ? 'p2' : 'p1';
@@ -898,6 +909,7 @@ async function onRollClick() {
 
   renderHUD();
   const d1 = Math.ceil(Math.random() * 6);
+  pushSyncState({ type: 'ROLL', dice: d1 });
   await animateDice(d1);
 
   const oldPos = player.position;
@@ -924,6 +936,7 @@ async function onRollClick() {
           // 100% of purchase price feeds the Staking Pool Instead of the bank
           state.stakingPool += landed.price;
           state.owners[landed.id] = ap;
+          pushSyncState({ type: 'BUY', p: ap, landed });
           updateTileOwnerBand(landed.id, ap);
           renderHUD();
           await animateCoins(ap, 'bank', 4);
@@ -944,6 +957,7 @@ async function onRollClick() {
       const owner = state.owners[landed.id];
       player.balance -= rentOwed;
       state.players[owner].balance += rentOwed;
+      pushSyncState({ type: 'RENT', p: ap, owner, rent: rentOwed, landed });
       renderHUD();
       await animateCoins(ap, owner, Math.min(Math.ceil(rentOwed / 40), 8));
       await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, landed.image, `-$${rentOwed}`, 1500);
@@ -953,6 +967,7 @@ async function onRollClick() {
   }
 
   state.rolling = false;
+  pushSyncState();
   switchTurn();
 }
 
@@ -1057,6 +1072,7 @@ function showPropertyCard(space) {
     delete state.owners[space.id];
     animateCoins('bank', state.turn, 3);
     renderHUD(); hidePropertyCard(); cleanup();
+    pushSyncState();
   };
   const onBuild = () => {
     if (state.turn !== ownerKey) return; // Only on your turn
@@ -1067,6 +1083,7 @@ function showPropertyCard(space) {
     updateBuildingIcons(space.id);
     renderHUD();
     showPropertyCard(space); // Refresh card
+    pushSyncState();
     checkWin();
   };
   function cleanup() { passBtn?.removeEventListener('click', onPass); sellBtn?.removeEventListener('click', onSell); buildBtn?.removeEventListener('click', onBuild); }
@@ -1102,11 +1119,12 @@ function renderPlayerCard(elId, player, playerId) {
   const el = document.getElementById(elId);
   if (!el) return;
   const isMyTurn = state.turn === playerId;
+  const isLocalClient = playerId === localId;
   const netWorth = calculateNetWorth(playerId);
   const inJail = player.jailTurns > 0;
 
   let actionsHtml = '';
-  if (isMyTurn && !state.rolling && !state.gameOver && !state.trade.active) {
+  if (isMyTurn && isLocalClient && !state.rolling && !state.gameOver && !state.trade.active) {
     const canTrade = player.balance >= 60 && getOwnedProperties(playerId === 'p1' ? 'p2' : 'p1').length > 0;
     actionsHtml = `
       <div class="hud-player__actions">
@@ -1158,6 +1176,7 @@ function renderPlayerCard(elId, player, playerId) {
 function switchTurn() {
   if (state.gameOver) return;
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
+  pushSyncState();
   startTurnTimer();
   renderHUD();
   // Show betting panel for the waiting player
@@ -1350,15 +1369,18 @@ function handleChatSend() {
   const text = input?.value.trim();
   if (!text) return;
   
-  const senderId = state.turn;
+  const senderId = localId || state.turn; // fallback to turn if not joined
   pushChatMessage(senderId, text);
   input.value = '';
 
-  // Temporary mock to demonstrate the toast for the user
-  setTimeout(() => {
-    const opp = senderId === 'p1' ? 'p2' : 'p1';
-    pushChatMessage(opp, 'Acknowledged.');
-  }, 2500);
+  // Broadcast to Realtime channel instead of just local injection
+  if (roomCode) {
+    try {
+      window.supabase.channel(`public:games:${roomCode}`).send({
+        type: 'broadcast', event: 'chat', payload: { sender: senderId, text }
+      });
+    } catch(e) {}
+  }
 }
 
 function pushChatMessage(senderId, text) {
@@ -1397,16 +1419,178 @@ function showChatToast(name, text, senderId) {
 
 
 /* ══════════════════════════════════════════════
+   MULTIPLAYER SYNC HELPERS
+   ============================================== */
+
+// FIX A: Extract only Domain Model fields — strip all View Model / ephemeral UI flags.
+// rolling, trade.active, bet.active, trade.timer must NEVER go to the database.
+function getCleanSyncState() {
+  return {
+    turn:        state.turn,
+    phase:       state.phase,
+    players:     state.players,
+    owners:      state.owners,
+    buildings:   state.buildings,
+    stakingPool: state.stakingPool,
+    winTarget:   state.winTarget,
+    gameOver:    state.gameOver,
+    last_event:  state.last_event ?? null,
+    // rolling, trade, bet are intentionally excluded — View Model only
+  };
+}
+
+// FIX D (client): Include client_version so the Edge Function can guard stale writes.
+async function pushSyncState(eventPayload = null) {
+  if (!localId) return;
+
+  if (eventPayload) {
+    state.last_event = Object.assign({ id: crypto.randomUUID(), p: localId }, eventPayload);
+    lastProcessedEventId = state.last_event.id;
+  } else {
+    state.last_event = null;
+  }
+
+  try {
+    const res = await supabase.functions.invoke('game_action', {
+      body: {
+        action: 'state_sync',
+        room_code: roomCode,
+        new_state: getCleanSyncState(), // FIX A: clean state only
+        client_version: gameVersion,    // FIX D: OCC version
+      }
+    });
+    if (res.data?.version) {
+      gameVersion = res.data.version; // advance our local version counter
+    }
+    if (res.data?.conflict) {
+      console.warn('[sync] stale write rejected (OCC). Re-fetching state...');
+      const { data } = await supabase.from('games').select('state, version').eq('id', gameId).single();
+      if (data) {
+        gameVersion = data.version;
+        playbackRender(data.state);
+      }
+    }
+  } catch(e) { console.error('[sync] pushSyncState error:', e); }
+}
+
+// FIX E: Smart merge — update Domain Model from server, preserve local View Model.
+async function playbackRender(payloadState) {
+  if (!payloadState) return;
+  const ev = payloadState.last_event;
+
+  // 1. Play animations BEFORE merging (so we animate FROM the old positions)
+  if (ev && ev.id !== lastProcessedEventId) {
+    lastProcessedEventId = ev.id;
+    if (ev.type === 'ROLL') {
+      await animateDice(ev.dice);
+      await animateTokenAlongPath(ev.p, state.players[ev.p].position, ev.dice);
+    } else if (ev.type === 'BUY') {
+      await animateCoins(ev.p, 'bank', 4);
+      await flashCenterEvent(`${payloadState.players[ev.p].name} bought ${ev.landed.name}!`, ev.landed.image, `$${ev.landed.price}`, 1500);
+    } else if (ev.type === 'RENT') {
+      await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
+      await flashCenterEvent(`${payloadState.players[ev.p].name} paid $${ev.rent} rent`, ev.landed.image, `-$${ev.rent}`, 1500);
+    }
+  }
+
+  // 2. Merge ONLY the Domain Model fields from server
+  state.turn        = payloadState.turn;
+  state.phase       = payloadState.phase;
+  state.players     = payloadState.players;
+  state.owners      = payloadState.owners;
+  state.buildings   = payloadState.buildings;
+  state.stakingPool = payloadState.stakingPool ?? state.stakingPool;
+  state.winTarget   = payloadState.winTarget   ?? state.winTarget;
+  state.gameOver    = payloadState.gameOver     ?? false;
+  state.last_event  = payloadState.last_event   ?? null;
+  // state.rolling, state.trade, state.bet are deliberately NOT taken from server
+
+  // 3. Safety net: if we receive state during an animation lock, release it
+  state.rolling = false;
+
+  renderHUD();
+  syncBoardState();
+}
+
+function syncBoardState() {
+  BOARD.forEach(space => {
+    const owner = state.owners[space.id];
+    if (owner) {
+      updateTileOwnerBand(space.id, owner);
+    } else {
+      resetTileBandColor(space.id, space);
+    }
+  });
+  ['p1', 'p2'].forEach(p => {
+    removeStaticToken(p);
+    placeStaticToken(p);
+  });
+}
+
+/* ══════════════════════════════════════════════
    INIT
    ============================================== */
-(function init() {
+async function init() {
   BOARD.forEach(space => boardEl.appendChild(createTile(space)));
   buildDiceFaces();
   placeStaticToken('p1'); placeStaticToken('p2');
   setupPopupClose();
   setupChat();
-  startTurnTimer();
-  renderHUD();
   resizeBoard();
   window.addEventListener('resize', resizeBoard);
-})();
+
+  if (!roomCode) {
+    console.error("No room code found!");
+    return;
+  }
+
+  const currentUser = await getUser();
+  if (!currentUser) return;
+
+  const { data: gameData } = await supabase.from('games').select('*').eq('room_code', roomCode).single();
+  if (!gameData) return;
+
+  // FIX C: Store the UUID primary key for reliable Realtime filtering
+  gameId = gameData.id;
+  // FIX D: Load current version counter from DB
+  gameVersion = gameData.version ?? 0;
+
+  const urlSlot = new URLSearchParams(window.location.search).get('slot');
+  if (urlSlot === 'p1' || urlSlot === 'p2') {
+    localId = urlSlot;
+  } else {
+    localId = gameData.player1_id === currentUser.id ? 'p1' : (gameData.player2_id === currentUser.id ? 'p2' : null);
+  }
+  console.log(`[init] Joined as ${localId} | gameId: ${gameId} | version: ${gameVersion}`);
+
+  // Initial Sync — use FIX E merge logic
+  if (gameData.state) {
+    playbackRender(gameData.state);
+  }
+  startTurnTimer();
+
+  // FIX C: Filter by primary key `id` — reliable on all Supabase plans
+  const channel = supabase.channel(`room:${gameId}`);
+  
+  channel.on('postgres_changes', { 
+    event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` 
+  }, payload => {
+    // Also track incoming version so we stay in sync with OCC counter
+    if (payload.new.version !== undefined) {
+      gameVersion = payload.new.version;
+    }
+    playbackRender(payload.new.state);
+  });
+
+  channel.on('broadcast', { event: 'chat' }, payload => {
+    if (payload.payload.sender !== localId) {
+      pushChatMessage(payload.payload.sender, payload.payload.text);
+    }
+  });
+
+  channel.subscribe((status) => {
+    console.log(`[realtime] channel status: ${status}`);
+  });
+}
+
+init();
