@@ -455,25 +455,38 @@ async function handleCorner(space, playerId) {
   const player = state.players[playerId];
 
   if (space.subtype === 'lucky') {
+    // Capture position BEFORE execute() — Subpoena changes player.position inside execute
+    const preMovePos = player.position;
     const card = drawLuckyCard();
     const result = card.execute(playerId, state);
     const displayText = result.text || card.text;
     renderHUD();
+
     if (result.jail) {
-      removeStaticToken(playerId);
-      placeStaticToken(playerId);
-      await flashCenterEvent(card.name + ': ' + displayText, 'luckycard.png', null, 2500);
+      // Animate token crawling to jail (position 22) instead of teleporting silently.
+      // execute() already set player.position = 22 and jailTurns = 2.
+      await flashCenterEvent(`${card.name}: ${displayText}`, 'luckycard.png', null, 1500);
+      const jailId = 22;
+      const jailSteps = ((jailId - preMovePos) + 28) % 28 || 28;
+      await animateTokenAlongPath(playerId, preMovePos, jailSteps, false);
+      renderHUD();
+      await flashCenterEvent(`${player.name} is sent to Jail!`, 'jail.png', '\uD83D\uDD12 2 Turns', 1500);
+
     } else if (result.teleport) {
-      // Fix 1: Machine-assigned utility — animate player there, then handle buy/rent
+      // Ecosystem Migration: animate player to the randomly assigned utility
       const target = result.teleport;
       await flashCenterEvent(`${card.name}: ${displayText}`, 'luckycard.png', null, 1800);
-      const steps = ((target.id - player.position) + 28) % 28 || 28;
-      const passedGenesis = (player.position + steps) > 28;
-      await animateTokenAlongPath(playerId, player.position, steps, passedGenesis);
+      const steps = ((target.id - preMovePos) + 28) % 28 || 28;
+      const passedGenesis = (preMovePos + steps) > 28;
+      await animateTokenAlongPath(playerId, preMovePos, steps, passedGenesis);
+      // FIX: update position after teleport so next roll starts from correct tile
+      player.position = target.id;
       if (passedGenesis) { player.balance += 200; renderHUD(); }
       if (!state.owners[target.id]) {
         if (player.balance >= target.price) {
+          resumeTurnTimer(); // only run timer during the buy decision
           const decision = await showCenterBuyDecision(target);
+          stopTurnTimer();
           if (decision === 'buy') {
             player.balance -= target.price;
             state.stakingPool += Math.round(target.price * 0.3);
@@ -498,6 +511,7 @@ async function handleCorner(space, playerId) {
         await flashCenterEvent(`${player.name} paid $${rent} rent!`, null, `-$${rent}`, 1500);
         pushSyncState({ type: 'RENT', p: playerId, owner, rent, landed: target });
       } else { showCenterIdle(); }
+
     } else {
       await flashCenterEvent(card.name + ': ' + displayText, 'luckycard.png', result.amount !== 0 ? `${result.amount > 0 ? '+' : ''}$${result.amount}` : null, 2500);
       if (result.amount > 0) await animateCoins(result.from, result.to, Math.min(Math.ceil(Math.abs(result.amount) / 50), 8));
@@ -703,6 +717,20 @@ function showTradePanel(playerId, step) {
     document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
     startTradeTimer();
   }
+  else if (step === 'waiting') {
+    // P1 (proposer) sees this after clicking PROPOSE — they wait while P2 counters.
+    // Only P2 receives TRADE_PROPOSED via broadcast and opens the counter panel.
+    const opp = playerId === 'p1' ? 'p2' : 'p1';
+    panel.innerHTML = `
+      <div class="trade-panel__header">⏳ AWAITING COUNTER</div>
+      <div class="trade-panel__info">Waiting for <strong>${state.players[opp].name}</strong> to make their counter-offer...</div>
+      <div class="trade-panel__actions">
+        <button class="btn btn--pass-center" id="trade-cancel">CANCEL TRADE</button>
+      </div>
+      <div class="trade-panel__timer">⏱ <span id="trade-timer">${t.timeLeft}</span>s</div>
+    `;
+    document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
+  }
   else if (step === 'counter') {
     const opp = playerId === 'p1' ? 'p2' : 'p1';
     const offerText = t.offerProps.map(id => BOARD.find(s => s.id === id)?.name).join(', ') || 'None';
@@ -723,6 +751,7 @@ function showTradePanel(playerId, step) {
     `;
     document.getElementById('trade-confirm')?.addEventListener('click', onTradeConfirm);
     document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
+    startTradeTimer(); // P2 starts their own countdown from the synced timeLeft
   }
   else if (step === 'review') {
     const offerText = t.offerProps.map(id => BOARD.find(s => s.id === id)?.name).join(', ') || 'None';
@@ -742,6 +771,7 @@ function showTradePanel(playerId, step) {
     `;
     document.getElementById('trade-accept')?.addEventListener('click', executeTrade);
     document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
+    startTradeTimer(); // P1 (proposer) starts their review countdown from synced timeLeft
   }
 }
 
@@ -782,16 +812,18 @@ function onTradePropose() {
   t.offerCash = parseInt(cashInput?.value) || 0;
   if (t.offerProps.length === 0 && t.offerCash === 0) { return; }
   stopAllPulse();
-  t.step = 'counter';
+  t.step = 'waiting';
   const opp = t.proposer === 'p1' ? 'p2' : 'p1';
-  startTradePulse(opp);
-  showTradePanel(opp, 'counter');
-  // Broadcast to P2 so they see the counter panel
+  // P1 (proposer) sees a waiting screen — NOT the counter panel (which is P2's job)
+  showTradePanel(t.proposer, 'waiting');
+  // Broadcast TRADE_PROPOSED so P2's client opens the counter panel.
+  // Include timeLeft so P2 inherits the same remaining time (not a fresh 40s).
   pushSyncState({
     type: 'TRADE_PROPOSED',
     proposer: t.proposer,
     offerProps: t.offerProps,
-    offerCash: t.offerCash
+    offerCash: t.offerCash,
+    timeLeft: t.timeLeft
   });
 }
 
@@ -801,15 +833,19 @@ function onTradeConfirm() {
   t.counterCash = parseInt(cashInput?.value) || 0;
   stopAllPulse();
   t.step = 'review';
-  showTradePanel(t.proposer, 'review');
-  // Broadcast to P1 so they see the final review panel
+  // P2 (counterparty) sees the final deal summary — not needed here since P1 opens it via broadcast
+  // But show it locally so P2 also sees what they agreed to
+  showTradePanel(t.proposer === 'p1' ? 'p2' : 'p1', 'review');
+  // Broadcast TRADE_COUNTERED so P1 opens the review panel.
+  // Include timeLeft so proposer gets the remaining time, not a fresh 40s.
   pushSyncState({
     type: 'TRADE_COUNTERED',
     proposer: t.proposer,
     offerProps: t.offerProps,
     offerCash: t.offerCash,
     counterProps: t.counterProps,
-    counterCash: t.counterCash
+    counterCash: t.counterCash,
+    timeLeft: t.timeLeft
   });
 }
 
@@ -854,7 +890,8 @@ async function executeTrade() {
 }
 
 function cancelTrade() {
-  // Broadcast cancellation so P2's overlay also closes
+  // Guard: both players' timers can expire simultaneously — second call must be a no-op
+  if (!state.trade.active) return;
   pushSyncState({ type: 'TRADE_CANCELLED' });
   flashCenterEvent('Trade cancelled.', null, null, 800);
   closeTrade();
@@ -1079,19 +1116,21 @@ async function onRollClick() {
 
     if (state.afk) state.afk[ap] = 0;
 
-    // Resume countdown for buy/pass decision window.
-    // handleTurnTimeout fires at 0 → resolveActiveDecision() → closes prompt automatically.
-    resumeTurnTimer();
     const landed = BOARD.find(s => s.id === newPos);
 
     /* ── CORNER ──────────────────────────────────────────────────── */
+    // NOTE: no resumeTurnTimer here — corner animations are automatic (no player decision).
+    // handleCorner itself calls resumeTurnTimer/stopTurnTimer only when a buy decision is shown.
     if (landed?.type === 'corner') { await handleCorner(landed, ap); }
 
     /* ── PROPERTY ────────────────────────────────────────────────── */
     if (landed && (landed.type === 'city' || landed.type === 'utility')) {
       if (!state.owners[landed.id]) {
         if (player.balance >= 0 && player.balance >= landed.price) {
+          // Timer only runs during the buy/pass decision — not during animations or rent payments
+          resumeTurnTimer();
           const decision = await showCenterBuyDecision(landed);
+          stopTurnTimer();
           if (decision === 'buy') {
             player.balance -= landed.price;
             state.stakingPool += Math.round(landed.price * 0.3);
@@ -1803,30 +1842,33 @@ async function _playbackImpl(payloadState) {
       showVictory(winner);
       return;
     } else if (ev.type === 'TRADE_PROPOSED') {
-      // Merge trade state and open counter panel on P2's side
-      state.trade = {
-        active: true, proposer: ev.proposer, step: 'counter',
-        offerProps: ev.offerProps, offerCash: ev.offerCash,
-        counterProps: [], counterCash: 0, timer: null, timeLeft: 40
-      };
+      // P2 receives this and opens the counter panel.
+      // P1 already switched to 'waiting' step locally — we must not overwrite that.
       const opp = ev.proposer === 'p1' ? 'p2' : 'p1';
       if (localId === opp) {
+        state.trade = {
+          active: true, proposer: ev.proposer, step: 'counter',
+          offerProps: ev.offerProps, offerCash: ev.offerCash,
+          counterProps: [], counterCash: 0, timer: null,
+          // Inherit remaining time from proposer — P2 gets same window, not a fresh 40s
+          timeLeft: ev.timeLeft ?? 40
+        };
         startTradePulse(opp);
-        showTradePanel(opp, 'counter');
-        startTradeTimer();
+        showTradePanel(opp, 'counter'); // startTradeTimer is called inside showTradePanel
       }
     } else if (ev.type === 'TRADE_COUNTERED') {
-      // Merge trade state and open review panel on P1's (proposer's) side
-      state.trade = {
-        active: true, proposer: ev.proposer, step: 'review',
-        offerProps: ev.offerProps, offerCash: ev.offerCash,
-        counterProps: ev.counterProps, counterCash: ev.counterCash,
-        timer: null, timeLeft: 40
-      };
+      // P1 receives this and opens the review panel.
       if (localId === ev.proposer) {
+        state.trade = {
+          active: true, proposer: ev.proposer, step: 'review',
+          offerProps: ev.offerProps, offerCash: ev.offerCash,
+          counterProps: ev.counterProps, counterCash: ev.counterCash,
+          timer: null,
+          // Inherit remaining time from P2's counter step
+          timeLeft: ev.timeLeft ?? 40
+        };
         stopAllPulse();
-        showTradePanel(ev.proposer, 'review');
-        startTradeTimer();
+        showTradePanel(ev.proposer, 'review'); // startTradeTimer called inside showTradePanel
       }
     } else if (ev.type === 'TRADE_EXECUTED') {
       // Apply trade visually on the remote player's board
