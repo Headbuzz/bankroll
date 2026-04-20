@@ -383,20 +383,27 @@ function buildDiceFaces() {
     die1El.appendChild(face);
   }
 }
-function animateDice(val) {
+// Split into spin + land for latency-hiding (spin starts instantly, server call runs concurrently)
+function startDiceSpin() {
+  SFX_DICE.currentTime = 0; SFX_DICE.play().catch(()=>{});
+  die1El.classList.add('rolling');
+}
+function landDice(val) {
   return new Promise(resolve => {
-    SFX_DICE.currentTime = 0; SFX_DICE.play().catch(()=>{});
-    die1El.classList.add('rolling');
+    die1El.classList.remove('rolling');
+    die1El.style.transform = `rotateX(${720+Math.random()*360}deg) rotateY(${720+Math.random()*360}deg)`;
     setTimeout(() => {
-      die1El.classList.remove('rolling');
-      die1El.style.transform = `rotateX(${720+Math.random()*360}deg) rotateY(${720+Math.random()*360}deg)`;
-      setTimeout(() => {
-        die1El.style.transition = 'transform 400ms cubic-bezier(.2,1.2,.5,1)';
-        die1El.style.transform = FACE_ROTATIONS[val];
-        setTimeout(() => { die1El.style.transition = ''; resolve(); }, 420);
-      }, 100);
-    }, 700);
+      die1El.style.transition = 'transform 400ms cubic-bezier(.2,1.2,.5,1)';
+      die1El.style.transform = FACE_ROTATIONS[val];
+      setTimeout(() => { die1El.style.transition = ''; resolve(); }, 420);
+    }, 100);
   });
+}
+// Full dice animation (used by remote playback where latency hiding isn't needed)
+async function animateDice(val) {
+  startDiceSpin();
+  await sleep(700);
+  await landDice(val);
 }
 
 
@@ -1184,42 +1191,49 @@ async function onRollClick() {
       return; // finally fires → state.rolling = false
     }
 
-    /* ── NORMAL PATH (Tier 2: Server-Authoritative Dice) ─────────── */
-    // Request dice from the Edge Function. Server uses crypto.getRandomValues() — unhackable.
-    // ~150ms round-trip is invisible behind the "roll" anticipation moment.
-    let d1, oldPos, newPos, passedGenesis;
+    /* ── NORMAL PATH (Tier 2: Instant Spin, Server Confirm) ────────── */
+    // Dice spins immediately (0ms delay). Edge Function generates the dice value
+    // concurrently — the 700ms spin animation hides the server round-trip latency.
+    const oldPos = player.position;
+    const rollEventId = crypto.randomUUID();
+    _markSeen(rollEventId); // pre-mark so postgres_changes never replays our own roll
+
+    // Phase 1: Start spin instantly — user sees immediate feedback
+    startDiceSpin();
+    const spinWait = sleep(700); // minimum spin duration (runs concurrently)
+
+    // Phase 2: Ask server for dice value (crypto.getRandomValues — unhackable)
+    let d1, newPos, passedGenesis, edgeFnWroteToDb = false;
     try {
       const rollRes = await supabase.functions.invoke('game_action', {
-        body: { action: 'roll', room_code: roomCode }
+        body: { action: 'roll', room_code: roomCode, event_id: rollEventId }
       });
       if (rollRes.error || !rollRes.data?.ok) throw new Error(rollRes.data?.error || 'roll failed');
-      // Server returns the single die result — pick d1 from the server's dice array
-      // The Edge Function uses d1+d2 but our board uses 1 die: we take the first value
-      const ev = rollRes.data.state?.last_event;
-      d1          = ev?.dice?.[0] ?? Math.ceil(Math.random() * 6); // fallback only on network error
-      oldPos      = player.position === ev?.landingPosition - d1 ? player.position : player.position; // keep local
-      newPos      = ev?.landingPosition ?? (() => { let p = player.position + d1; if (p > 28) p -= 28; return p; })();
-      passedGenesis = ev?.passedGenesis ?? false;
-      // Merge server position + balance into local state (single source of truth)
+      d1            = rollRes.data.dice;
+      newPos        = rollRes.data.newPos;
+      passedGenesis = rollRes.data.passedGenesis;
       player.position = newPos;
-      if (passedGenesis) player.balance = rollRes.data.state.players[ap].balance;
+      if (passedGenesis) player.balance += 200;
+      edgeFnWroteToDb = true;
     } catch (_rollErr) {
-      // Graceful fallback: use local dice only if Edge Fn is unreachable (dev/offline)
+      // Graceful fallback: local dice only if Edge Fn is unreachable (dev/offline)
       console.warn('[roll] Edge Fn unavailable, falling back to local dice:', _rollErr);
-      d1           = Math.ceil(Math.random() * 6);
-      oldPos       = player.position;
-      newPos       = player.position + d1 > 28 ? player.position + d1 - 28 : player.position + d1;
-      passedGenesis = (player.position + d1) > 28;
+      d1            = Math.ceil(Math.random() * 6);
+      newPos        = oldPos + d1 > 28 ? oldPos + d1 - 28 : oldPos + d1;
+      passedGenesis = (oldPos + d1) > 28;
       player.position = newPos;
       if (passedGenesis) player.balance += 200;
     }
 
-    oldPos = oldPos ?? player.position; // ensure oldPos is always set
+    // Wait for minimum spin — may already be done if server took >700ms
+    await spinWait;
+
+    // Phase 3: Land the dice on the server's (or fallback) value
+    await landDice(d1);
     animatingTokens.add(ap);
 
-    pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
-
-    await animateDice(d1);
+    // Broadcast to P2 (skip state_sync if Edge Fn already persisted to DB)
+    pushSyncState({ id: rollEventId, type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis }, edgeFnWroteToDb);
     await animateTokenAlongPath(ap, oldPos, d1, true);
     if (passedGenesis) {
       renderHUD();
@@ -1877,7 +1891,7 @@ function getCleanSyncState() {
 // Fast path: Supabase Broadcast delivers the event to P2 in <200ms.
 // Slow path: Edge Function persists state to DB (~1-5s), fires postgres_changes.
 // Full state is included in broadcast so P2 can immediately apply balance/ownership changes.
-function pushSyncState(eventPayload = null) {
+function pushSyncState(eventPayload = null, skipDbWrite = false) {
   if (!localId) return;
 
   if (eventPayload) {
@@ -1908,46 +1922,53 @@ function pushSyncState(eventPayload = null) {
   }
 
   // SLOW PATH: Persist full state to DB in the background (no await)
-  supabase.functions.invoke('game_action', {
-    body: {
-      action: 'state_sync',
-      room_code: roomCode,
-      new_state: getCleanSyncState(),
-      client_version: gameVersion,
-    }
-  }).then(res => {
-    if (res.data?.version) gameVersion = res.data.version;
-    if (res.data?.conflict) {
-      console.warn('[sync] OCC conflict, re-fetching state...');
-      supabase.from('games').select('state, version').eq('id', gameId).single().then(({ data }) => {
-        if (data) { gameVersion = data.version; playbackRender(data.state); }
-      });
-    }
-  }).catch(e => console.error('[sync] DB push error:', e));
+  // skipDbWrite=true for ROLL: Edge Function already persisted the roll state to DB
+  if (!skipDbWrite) {
+    supabase.functions.invoke('game_action', {
+      body: {
+        action: 'state_sync',
+        room_code: roomCode,
+        new_state: getCleanSyncState(),
+        client_version: gameVersion,
+      }
+    }).then(res => {
+      if (res.data?.version) gameVersion = res.data.version;
+      if (res.data?.conflict) {
+        console.warn('[sync] OCC conflict, re-fetching state...');
+        supabase.from('games').select('state, version').eq('id', gameId).single().then(({ data }) => {
+          if (data) { gameVersion = data.version; playbackRender(data.state); }
+        });
+      }
+    }).catch(e => console.error('[sync] DB push error:', e));
+  }
 }
 
 // Serialized playback queue: prevents concurrent calls from racing/dropping events.
 // If playbackRender is already running, we queue the latest state and drain after.
 let _isPlayingBack = false;
 let _playbackQueue = null;
+let _playbackQueueBroadcast = false;
 
-async function playbackRender(payloadState) {
+async function playbackRender(payloadState, { fromBroadcast = false } = {}) {
   if (_isPlayingBack) {
-    _playbackQueue = payloadState; // keep only latest — no animation backlog
+    _playbackQueue = payloadState;
+    _playbackQueueBroadcast = fromBroadcast;
     return;
   }
   _isPlayingBack = true;
-  try { await _playbackImpl(payloadState); } finally {
+  try { await _playbackImpl(payloadState, fromBroadcast); } finally {
     _isPlayingBack = false;
     if (_playbackQueue) {
       const next = _playbackQueue;
+      const nextBr = _playbackQueueBroadcast;
       _playbackQueue = null;
-      await playbackRender(next); // drain queue
+      _playbackQueueBroadcast = false;
+      await playbackRender(next, { fromBroadcast: nextBr });
     }
   }
 }
 
-async function _playbackImpl(payloadState) {
+async function _playbackImpl(payloadState, fromBroadcast = false) {
   if (!payloadState) return;
   const ev = payloadState.last_event;
   const prevTurn = state.turn; // capture BEFORE merge to detect turn change
@@ -1964,7 +1985,11 @@ async function _playbackImpl(payloadState) {
         animateCoins('bank', ev.p, 5);
       }
     } else if (ev.type === 'BUY') {
-      // Animate + merge state immediately from broadcast payload (no waiting for DB)
+      // Explicitly update state.owners so syncBoardState paints correctly
+      if (ev.landed?.id !== undefined && ev.p) {
+        state.owners[ev.landed.id] = ev.p;
+        updateTileOwnerBand(ev.landed.id, ev.p);
+      }
       await animateCoins(ev.p, 'bank', 4);
       const buyerName = payloadState.players?.[ev.p]?.name || 'Opponent';
       await flashCenterEvent(`\uD83C\uDFD9\uFE0F ${buyerName} bought ${ev.landed.name}!`, null, `Rent: $${ev.newRent ?? ev.landed.price}`, 1500);
@@ -2015,9 +2040,9 @@ async function _playbackImpl(payloadState) {
       // Without this, the countdown could reach 0 during coin animations and fire cancelTrade.
       closeTrade();
       const opp2 = ev.proposer === 'p1' ? 'p2' : 'p1';
-      // Apply ownership on remote board (balance comes from mergeServerState via postgres_changes)
-      ev.offerProps.forEach(sid => updateTileOwnerBand(sid, opp2));
-      ev.counterProps.forEach(sid => updateTileOwnerBand(sid, ev.proposer));
+      // Explicitly update state.owners + repaint bands
+      ev.offerProps.forEach(sid => { state.owners[sid] = opp2; updateTileOwnerBand(sid, opp2); });
+      ev.counterProps.forEach(sid => { state.owners[sid] = ev.proposer; updateTileOwnerBand(sid, ev.proposer); });
       if (ev.offerCash > 0) await animateCoins(ev.proposer, opp2, Math.min(Math.ceil(ev.offerCash / 80), 5));
       if (ev.counterCash > 0) await animateCoins(opp2, ev.proposer, Math.min(Math.ceil(ev.counterCash / 80), 5));
       await flashCenterEvent('\uD83E\uDD1D Trade completed!', null, '\u2705', 1500);
@@ -2026,8 +2051,13 @@ async function _playbackImpl(payloadState) {
       await flashCenterEvent('Trade cancelled.', null, '\u274C', 800);
       closeTrade();
     } else if (ev.type === 'SELL') {
-      // Fix 4: remote player sees sell animation + notification
+      // Explicitly remove ownership so syncBoardState resets band correctly
       const sp = BOARD.find(s => s.id === ev.spaceId);
+      if (ev.spaceId !== undefined) {
+        delete state.owners[ev.spaceId];
+        state.buildings[ev.spaceId] = 0;
+        if (sp) resetTileBandColor(ev.spaceId, sp);
+      }
       const sellerName = payloadState.players?.[ev.p]?.name || 'Opponent';
       await animateCoins('bank', ev.p, 2);
       await flashCenterEvent(`${sellerName} sold ${sp?.name || 'a property'}!`, null, `+$${ev.salePrice}`, 1200);
@@ -2071,9 +2101,9 @@ async function _playbackImpl(payloadState) {
     }
   }
 
-  // Step 5 — Broadcast path: skip financial fields (balance, owners).
-  // Those only merge from postgres_changes (DB truth), not from untrusted broadcast payload.
-  mergeServerState(payloadState, /* fromBroadcast= */ true);
+  // Use the fromBroadcast flag passed down from the caller:
+  // broadcast path → true (skip balance), postgres_changes path → false (full merge)
+  mergeServerState(payloadState, fromBroadcast);
 
   // Restart timer only when turn changed
   if (payloadState.turn && payloadState.turn !== prevTurn) {
@@ -2122,21 +2152,23 @@ function mergeServerState(payloadState, fromBroadcast = false) {
       }
     }
   } else {
-    // Broadcast path: only merge safe non-financial fields
-    // Position is safe — it drives animation and is validated server-side
+    // Broadcast path: merge everything EXCEPT balance (only financial field)
+    // owners + buildings are display-safe — rent is validated server-side via DB state
+    state.owners    = payloadState.owners    ?? state.owners;
+    state.buildings = payloadState.buildings ?? state.buildings;
     if (payloadState.players) {
       for (const slot of ['p1', 'p2']) {
         if (payloadState.players[slot]) {
-          // Only update position and jailTurns from broadcast — NOT balance
+          // Position, jailTurns, name, tokenImg — all safe. Only balance is DB-only.
           if (payloadState.players[slot].position !== undefined)
             state.players[slot].position  = payloadState.players[slot].position;
           if (payloadState.players[slot].jailTurns !== undefined)
             state.players[slot].jailTurns = payloadState.players[slot].jailTurns;
+          if (payloadState.players[slot].name)
+            state.players[slot].name = payloadState.players[slot].name;
         }
       }
     }
-    // Buildings from broadcast are safe for display (can't be forged to grant rent)
-    state.buildings = payloadState.buildings ?? state.buildings;
   }
 
   // NEVER reset state.rolling here for the ACTIVE player — mid-roll state must be preserved.
@@ -2237,8 +2269,8 @@ async function init() {
         await flashCenterEvent(`${state.players[ev.p]?.name || 'Opponent'} collected $200!`, null, '+$200', 1200);
         animateCoins('bank', ev.p, 5);
       }
-      // Merge the full state included in broadcast (has genesis balance, updated position)
-      if (fullState) mergeServerState(fullState);
+      // Merge broadcast state — fromBroadcast=true: skips balance (DB-only)
+      if (fullState) mergeServerState(fullState, true);
       renderHUD();
       syncBoardState();
       return;
@@ -2247,7 +2279,7 @@ async function init() {
     // All other events: run via playbackRender using the full broadcast state
     // This gives instant BUY/RENT/BET/KICK feedback WITHOUT waiting for DB round-trip
     if (fullState) {
-      await playbackRender(fullState);
+      await playbackRender(fullState, { fromBroadcast: true });
     }
   });
 

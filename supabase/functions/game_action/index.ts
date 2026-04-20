@@ -217,16 +217,17 @@ Deno.serve(async (req: Request) => {
       if (game.state.turn !== mySlot) return json({ error: 'Not your turn' }, 403);
       if (game.state.phase !== 'idle') return json({ error: 'Cannot roll right now' }, 400);
 
-      const player = { ...game.state.players[mySlot] }; // shallow copy — never mutate game.state directly
+      const player = { ...game.state.players[mySlot] };
 
-      // Jail path: auto-skip for the serve turn (jailTurns=1); pay/stay decision is client-side.
-      // The client sends jail decisions separately; this action only handles normal roll.
       if (player.jailTurns > 0) {
         return json({ error: 'Player is in jail — use jail actions' }, 400);
       }
 
+      // Client passes event_id so broadcast + DB share the same dedup key
+      const { event_id } = body as any;
+
       // Single die (1–6) using cryptographically secure randomness
-      const d1 = roll(); // roll() uses crypto.getRandomValues internally
+      const d1 = roll();
       const BOARD_SIZE = 28;
       const oldPos = player.position;
       let newPos = oldPos + d1;
@@ -234,16 +235,18 @@ Deno.serve(async (req: Request) => {
       if (newPos > BOARD_SIZE) newPos -= BOARD_SIZE;
 
       player.position = newPos;
-      if (passedGenesis) player.balance += 200; // Genesis bonus — server authoritative
+      if (passedGenesis) player.balance += 200;
 
       const newState = {
         ...game.state,
+        sentBy: mySlot, // self-echo suppression for postgres_changes on the roller's client
         phase: 'action',
         players: { ...game.state.players, [mySlot]: player },
         last_event: {
           type: 'ROLL',
-          player: mySlot,
-          dice: [d1],           // array for forward-compat; client takes dice[0]
+          id: event_id || crypto.randomUUID(), // shared with broadcast for dedup
+          p: mySlot,
+          dice: d1,
           passedGenesis,
           landingPosition: newPos,
           oldPos,
@@ -253,7 +256,7 @@ Deno.serve(async (req: Request) => {
       const { error: err } = await db.from('games').update({ state: newState }).eq('room_code', room_code);
       if (err) throw new Error(err.message);
 
-      return json({ ok: true, state: newState });
+      return json({ ok: true, dice: d1, newPos, oldPos, passedGenesis });
     }
 
     // ══════════════════════════════════════════════════════════
