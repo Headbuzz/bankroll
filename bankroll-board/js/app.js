@@ -1,7 +1,8 @@
 /* ══════════════════════════════════════════════
-   BANKROLL — Board Engine v6
+   BANKROLL — Board Engine v7 (Tier 3 Server-Authoritative)
    Features: Monopoly, Buildings, Scaled Rent, Trade, Prediction Market
    Win: $2,500 NW | Bankrupt: -$500
+   Security: All financial mutations route through validated Edge Function actions
    ============================================== */
 
 'use strict';
@@ -1088,7 +1089,7 @@ function showBettingPanel(bettorId) {
       // Coin animation for the bettor
       animateCoins(bettorId, 'bank', 3);
       // Notify opponent via broadcast (fast path)
-      pushSyncState({ type: 'BET_PLACED', bettor: bettorId, spaceName: targetSpace ? targetSpace.name : value });
+      pushSyncState({ type: 'BET_PLACED', bettor: bettorId, betType: type, betValue: value, spaceName: targetSpace ? targetSpace.name : value });
     });
   });
 }
@@ -1157,7 +1158,7 @@ async function onRollClick() {
       if (player.jailTurns === 2) {
         // FIRST jail turn: show the pay-or-serve decision exactly once.
         // jailTurns=2 means player arrived in jail on their previous turn.
-        pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: 2 });
+        broadcastEvent({ type: 'JAIL_TURN', p: ap, turnsLeft: 2 }); // notify P2 (no DB write yet)
         resumeTurnTimer(); // allow AFK auto-resolve
         const decision = await showCenterDecision(
           '\uD83D\uDD12 You are in Jail! Pay $150 to escape now, or serve (next turn auto-skipped).',
@@ -1179,6 +1180,8 @@ async function onRollClick() {
         } else {
           // Chose to serve or couldn't afford — next turn auto-skipped, no decision shown
           player.jailTurns = 1;
+          serverAction('jail_serve'); // persist jailTurns 2→1 server-side
+          broadcastEvent({ type: 'JAIL_SERVE', p: ap, turnsLeft: 1 });
           await flashCenterEvent(
             `${player.name} chose to serve. Next turn will be auto-skipped.`,
             'jail.png', '\uD83D\uDD12', 1500
@@ -1187,7 +1190,8 @@ async function onRollClick() {
       } else {
         // jailTurns === 1: MANDATORY AUTO-SKIP — no prompt, just notify and move on
         player.jailTurns = 0;
-        pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: 0 });
+        serverAction('jail_serve'); // persist jailTurns 1→0 server-side
+        broadcastEvent({ type: 'JAIL_TURN', p: ap, turnsLeft: 0 });
         await flashCenterEvent(
           `${player.name}'s jail sentence served \u2014 turn auto-skipped!`,
           'jail.png', '\uD83D\uDD13 Released', 1800
@@ -1577,17 +1581,24 @@ function renderPlayerCard(elId, player, playerId) {
 /* ══════════════════════════════════════════════
    TURN SWITCHING
    ============================================== */
-// switchTurn is synchronous - pushSyncState fires in background, no awaiting
+// switchTurn: Tier 3 — routes financial event + end_turn through validated server actions
 function switchTurn(finalEvent = null) {
   if (state.gameOver) return;
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
   state.bet = { active: false, bettor: null, betType: null, betValue: null };
-  pushSyncState(finalEvent); // fire-and-forget: broadcasts instantly, DB syncs in background
+  // Persist financial event if present (routes to buy/rent/etc via validated action)
+  if (finalEvent) {
+    pushSyncState(finalEvent, true); // broadcast only — _serverPersist handles DB
+    _serverPersist(Object.assign({ id: crypto.randomUUID(), p: localId }, finalEvent));
+  }
+  // Persist turn switch via validated end_turn (fire-and-forget, OCC-safe)
+  serverAction('end_turn').catch(() => {});
+  // Broadcast full state with switched turn for instant P2 rendering
+  broadcastEvent({ type: 'END_TURN', player: state.turn === 'p1' ? 'p2' : 'p1', next: state.turn });
   startTurnTimer();
   renderHUD();
   hideBettingPanel();
   const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
-  // Fix 11: only open betting panel when no bet is already active
   if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150 && !state.bet?.active) {
     showBettingPanel(waitingPlayer);
   }
@@ -1895,7 +1906,7 @@ function getCleanSyncState() {
 
 // pushSyncState: FIRE-AND-FORGET — never blocks the caller.
 // Fast path: Supabase Broadcast delivers the event to P2 in <200ms.
-// Slow path: Edge Function persists state to DB (~1-5s), fires postgres_changes.
+// Slow path: Validated Edge Function action persists to DB atomically (Tier 3).
 // Full state is included in broadcast so P2 can immediately apply balance/ownership changes.
 function pushSyncState(eventPayload = null, skipDbWrite = false) {
   if (!localId) return;
@@ -1908,44 +1919,96 @@ function pushSyncState(eventPayload = null, skipDbWrite = false) {
   }
 
   // FAST PATH: Broadcast event + FULL STATE so P2 can apply changes instantly
-  if (channel && state.last_event) {
+  if (channel) {
     channel.send({
       type: 'broadcast',
       event: 'game_event',
       payload: {
         ev: state.last_event,
-        fullState: getCleanSyncState(), // P2 merges this immediately — no waiting for DB
+        fullState: getCleanSyncState(),
         sentBy: localId
       }
     }).catch(() => {});
-  } else if (channel && !state.last_event) {
-    // State-only push (no event) — still broadcast full state for instant merge
-    channel.send({
-      type: 'broadcast',
-      event: 'game_event',
-      payload: { ev: null, fullState: getCleanSyncState(), sentBy: localId }
-    }).catch(() => {});
   }
 
-  // SLOW PATH: Persist full state to DB in the background (no await)
-  // skipDbWrite=true for ROLL: Edge Function already persisted the roll state to DB
+  // SLOW PATH: Route to validated Edge Function action (Tier 3 — no raw state_sync for financial actions)
   if (!skipDbWrite) {
-    supabase.functions.invoke('game_action', {
-      body: {
-        action: 'state_sync',
-        room_code: roomCode,
-        new_state: getCleanSyncState(),
-        client_version: gameVersion,
-      }
+    _serverPersist(state.last_event);
+  }
+}
+
+// ── Tier 3: Route events to validated Edge Function actions ──────────────
+// Financial actions go through server-validated endpoints with OCC atomicity.
+// Non-financial events fall back to state_sync for backward compatibility.
+function _serverPersist(ev) {
+  function call(action, extra = {}) {
+    return supabase.functions.invoke('game_action', {
+      body: { action, room_code: roomCode, ...extra }
     }).then(res => {
       if (res.data?.version) gameVersion = res.data.version;
-      if (res.data?.conflict) {
-        console.warn('[sync] OCC conflict, re-fetching state...');
-        supabase.from('games').select('state, version').eq('id', gameId).single().then(({ data }) => {
-          if (data) { gameVersion = data.version; playbackRender(data.state); }
-        });
+      if (res.data?.error) {
+        console.warn(`[server:${action}]`, res.data.error);
+        _refetchState();
       }
-    }).catch(e => console.error('[sync] DB push error:', e));
+      return res.data;
+    }).catch(e => { console.error(`[server:${action}]`, e); });
+  }
+  function _refetchState() {
+    supabase.from('games').select('state, version').eq('room_code', roomCode).single().then(({ data }) => {
+      if (data) { gameVersion = data.version; playbackRender(data.state); }
+    });
+  }
+  function _syncFallback() {
+    call('state_sync', { new_state: getCleanSyncState(), client_version: gameVersion });
+  }
+
+  if (!ev) { _syncFallback(); return; }
+
+  switch (ev.type) {
+    case 'ROLL':      break; // Already persisted by Edge Function (skipDbWrite=true at callsite)
+    case 'BUY':       call('buy', { space_id: ev.landed?.id || ev.spaceId }); break;
+    case 'RENT':      call('rent', { space_id: ev.landed?.id || ev.spaceId }); break;
+    case 'BUILD':     call('build', { space_id: ev.spaceId }); break;
+    case 'SELL':      call('sell', { space_id: ev.spaceId }); break;
+    case 'JAIL_EXIT': call('jail_pay'); break;
+    case 'JAIL_TURN': call('jail_serve'); break;
+    case 'BET_PLACED': call('bet', { bet_type: ev.betType || 'space', bet_value: ev.betValue }); break;
+    case 'TRADE_EXECUTED':
+      call('trade_execute', {
+        proposer: ev.proposer, offerProps: ev.offerProps, counterProps: ev.counterProps,
+        offerCash: ev.offerCash, counterCash: ev.counterCash
+      }); break;
+    case 'END_TURN':  call('end_turn'); break;
+    // Non-deterministic or non-financial: fallback to state_sync (v2 will make these server-first)
+    default:          _syncFallback(); break;
+  }
+}
+
+// serverAction: Direct Edge Function call for server-first flows (lucky, staking, jail, etc.)
+function serverAction(action, params = {}) {
+  return supabase.functions.invoke('game_action', {
+    body: { action, room_code: roomCode, ...params }
+  }).then(res => {
+    if (res.data?.version) gameVersion = res.data.version;
+    if (res.data?.error) console.warn(`[serverAction:${action}]`, res.data.error);
+    return res.data;
+  }).catch(e => {
+    console.error(`[serverAction:${action}]`, e);
+    return null;
+  });
+}
+
+// broadcastEvent: Lightweight broadcast — no DB write.
+// Used after server-first actions where the server already persisted state.
+function broadcastEvent(evt) {
+  if (!localId) return;
+  state.last_event = Object.assign({ id: crypto.randomUUID(), p: localId }, evt);
+  _markSeen(state.last_event.id);
+  if (channel) {
+    channel.send({
+      type: 'broadcast', event: 'game_event',
+      payload: { ev: state.last_event, fullState: getCleanSyncState(), sentBy: localId }
+    }).catch(() => {});
   }
 }
 
