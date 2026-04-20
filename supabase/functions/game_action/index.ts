@@ -217,38 +217,37 @@ Deno.serve(async (req: Request) => {
       if (game.state.turn !== mySlot) return json({ error: 'Not your turn' }, 403);
       if (game.state.phase !== 'idle') return json({ error: 'Cannot roll right now' }, 400);
 
-      const d1 = roll(); const d2 = roll();
-      const diceTotal = d1 + d2;
-      const player = game.state.players[mySlot];
-      let pos = player.position;
-      const path = [];
-      let passedGenesis = false;
+      const player = { ...game.state.players[mySlot] }; // shallow copy — never mutate game.state directly
 
-      // Handle jail? For now just allow roll if they are out of jail or we skip it for prototyping.
+      // Jail path: auto-skip for the serve turn (jailTurns=1); pay/stay decision is client-side.
+      // The client sends jail decisions separately; this action only handles normal roll.
       if (player.jailTurns > 0) {
-        player.jailTurns--;
-        // For simplicity, just decrement and let them roll if they escape? Or they skip.
+        return json({ error: 'Player is in jail — use jail actions' }, 400);
       }
 
-      for (let i = 0; i < diceTotal; i++) {
-        pos++;
-        if (pos > 28) {
-          pos = 1;
-          passedGenesis = true;
-        }
-        path.push(pos);
-      }
+      // Single die (1–6) using cryptographically secure randomness
+      const d1 = roll(); // roll() uses crypto.getRandomValues internally
+      const BOARD_SIZE = 28;
+      const oldPos = player.position;
+      let newPos = oldPos + d1;
+      const passedGenesis = newPos > BOARD_SIZE;
+      if (newPos > BOARD_SIZE) newPos -= BOARD_SIZE;
 
-      player.position = pos;
-      if (passedGenesis) {
-        player.balance += 200;
-      }
+      player.position = newPos;
+      if (passedGenesis) player.balance += 200; // Genesis bonus — server authoritative
 
-      const newState = { 
-        ...game.state, 
-        phase: 'action', 
+      const newState = {
+        ...game.state,
+        phase: 'action',
         players: { ...game.state.players, [mySlot]: player },
-        last_event: { type: 'ROLL', player: mySlot, dice: [d1, d2], path, passedGenesis, landingPosition: pos }
+        last_event: {
+          type: 'ROLL',
+          player: mySlot,
+          dice: [d1],           // array for forward-compat; client takes dice[0]
+          passedGenesis,
+          landingPosition: newPos,
+          oldPos,
+        }
       };
 
       const { error: err } = await db.from('games').update({ state: newState }).eq('room_code', room_code);

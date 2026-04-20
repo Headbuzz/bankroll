@@ -719,7 +719,7 @@ function onTradeClick() {
   renderHUD();
   animateCoins(ap, 'bank', 2);
 
-  state.trade = { active: true, proposer: ap, step: 'select', offerProps: [], offerCash: 0, counterProps: [], counterCash: 0, timer: null, timeLeft: 40 };
+  state.trade = { active: true, proposer: ap, step: 'select', offerProps: [], offerCash: 0, counterProps: [], counterCash: 0, timer: null, timeLeft: 40, timeMax: 40 };
   startTradePulse(ap);
   showTradePanel(ap, 'select');
 }
@@ -733,110 +733,135 @@ function showTradePanel(playerId, step) {
 
   if (step === 'select') {
     panel.innerHTML = `
-      <div class="trade-panel__header">💱 SELECT PROPERTIES TO OFFER</div>
-      <div class="trade-panel__info">Click your pulsing tiles on the board to select/deselect.</div>
-      <div class="trade-panel__selected" id="trade-selected-list">None selected</div>
-      <div class="trade-panel__cash-row">
-        <label>Add Cash: $</label>
+      <div class="tp-header">💱 Select Properties to Offer</div>
+      <div class="tp-section-label">YOUR OFFER <span class="tp-badge">$60 fee paid</span></div>
+      <div class="tp-cards" id="trade-selected-list"><div class="tp-empty">Click your pulsing tiles on the board</div></div>
+      <div class="tp-cash-row">
+        <label>+ Cash: $</label>
         <input type="number" id="trade-cash-input" min="0" max="${state.players[playerId].balance}" value="0" class="trade-panel__cash"/>
       </div>
-      <div class="trade-panel__actions">
-        <button class="btn btn--buy-center" id="trade-propose">PROPOSE</button>
+      <div class="tp-value-row" id="trade-offer-value">Total offer value: ~$0</div>
+      <div class="tp-actions">
+        <button class="btn btn--buy-center" id="trade-propose">PROPOSE →</button>
         <button class="btn btn--pass-center" id="trade-cancel">CANCEL</button>
       </div>
-      <div class="trade-panel__timer">⏱ <span id="trade-timer">${t.timeLeft}</span>s</div>
+      ${_timerBarHtml()}
     `;
     document.getElementById('trade-propose')?.addEventListener('click', onTradePropose);
     document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
-    startTradeTimer();
+    document.getElementById('trade-cash-input')?.addEventListener('input', _refreshSelectPreview);
+    startTradeTimer(40);
   }
   else if (step === 'waiting') {
-    // P1 (proposer) sees this after clicking PROPOSE — they wait while P2 counters.
-    // Only P2 receives TRADE_PROPOSED via broadcast and opens the counter panel.
     const opp = playerId === 'p1' ? 'p2' : 'p1';
+    const offerCards = t.offerProps.map(id => _buildTradeCard(id)).join('');
     panel.innerHTML = `
-      <div class="trade-panel__header">⏳ AWAITING COUNTER</div>
-      <div class="trade-panel__info">Waiting for <strong>${state.players[opp].name}</strong> to make their counter-offer...</div>
-      <div class="trade-panel__actions">
+      <div class="tp-header">⏳ Awaiting Counter-Offer</div>
+      <div class="tp-section-label">YOU OFFERED</div>
+      <div class="tp-cards">${offerCards || '<div class="tp-empty">Cash only</div>'}</div>
+      ${t.offerCash > 0 ? `<div class="tp-cash-chip">+ $${t.offerCash} cash</div>` : ''}
+      <div class="tp-waiting-msg">Waiting for <strong>${state.players[opp].name}</strong> to respond…</div>
+      <div class="tp-actions">
         <button class="btn btn--pass-center" id="trade-cancel">CANCEL TRADE</button>
       </div>
-      <div class="trade-panel__timer">⏱ <span id="trade-timer">${t.timeLeft}</span>s</div>
+      ${_timerBarHtml()}
     `;
     document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
+    // Timer already running from select step — just patch the target element IDs by
+    // overwriting the interval (startTradeTimer calls clearInterval first so it's safe)
+    startTradeTimer(t.timeMax || 40);
   }
   else if (step === 'counter') {
     const opp = playerId === 'p1' ? 'p2' : 'p1';
-    const offerText = t.offerProps.map(id => BOARD.find(s => s.id === id)?.name).join(', ') || 'None';
+    const offerCards = t.offerProps.map(id => _buildTradeCard(id)).join('');
+    const incomingVal = _tradePortfolioValue(t.offerProps, t.offerCash);
     panel.innerHTML = `
-      <div class="trade-panel__header">📨 TRADE OFFER from ${state.players[t.proposer].name}</div>
-      <div class="trade-panel__info">Offers: ${offerText}${t.offerCash > 0 ? ` + $${t.offerCash}` : ''}</div>
-      <div class="trade-panel__info">Click your pulsing tiles to offer back.</div>
-      <div class="trade-panel__selected" id="trade-selected-list">None selected</div>
-      <div class="trade-panel__cash-row">
-        <label>Add Cash: $</label>
+      <div class="tp-header">📨 Offer from ${state.players[t.proposer].name}</div>
+      <div class="tp-section-label">THEY OFFER YOU</div>
+      <div class="tp-cards">${offerCards || '<div class="tp-empty">Cash only</div>'}</div>
+      ${t.offerCash > 0 ? `<div class="tp-cash-chip tp-cash-chip--in">+ $${t.offerCash} cash</div>` : ''}
+      <div class="tp-value-row">Incoming value: <strong>~$${incomingVal}</strong></div>
+      <div class="tp-divider"></div>
+      <div class="tp-section-label">YOUR COUNTER <span class="tp-hint">(click pulsing tiles)</span></div>
+      <div class="tp-cards" id="trade-selected-list"><div class="tp-empty">Nothing selected yet</div></div>
+      <div class="tp-cash-row">
+        <label>+ Cash: $</label>
         <input type="number" id="trade-cash-input" min="0" max="${state.players[opp].balance}" value="0" class="trade-panel__cash"/>
       </div>
-      <div class="trade-panel__actions">
-        <button class="btn btn--buy-center" id="trade-confirm">CONFIRM</button>
+      <div class="tp-value-row" id="trade-counter-value">Counter value: ~$0</div>
+      <div class="tp-net-row" id="trade-net-row">Net for you: <strong style="color:#4CAF50">+$${incomingVal}</strong> ✓</div>
+      <div class="tp-actions">
+        <button class="btn btn--buy-center" id="trade-confirm">CONFIRM COUNTER</button>
         <button class="btn btn--pass-center" id="trade-cancel">PASS</button>
       </div>
-      <div class="trade-panel__timer">⏱ <span id="trade-timer">${t.timeLeft}</span>s</div>
+      ${_timerBarHtml()}
     `;
     document.getElementById('trade-confirm')?.addEventListener('click', onTradeConfirm);
     document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
-    startTradeTimer(); // P2 starts their own countdown from the synced timeLeft
+    document.getElementById('trade-cash-input')?.addEventListener('input', () => _refreshCounterPreview(incomingVal));
+    startTradeTimer(t.timeLeft || 40);
   }
   else if (step === 'review') {
-    const offerText = t.offerProps.map(id => BOARD.find(s => s.id === id)?.name).join(', ') || 'None';
-    const counterText = t.counterProps.map(id => BOARD.find(s => s.id === id)?.name).join(', ') || 'None';
     const opp = t.proposer === 'p1' ? 'p2' : 'p1';
+    const offerCards = t.offerProps.map(id => _buildTradeCard(id)).join('');
+    const counterCards = t.counterProps.map(id => _buildTradeCard(id)).join('');
+    const giveVal = _tradePortfolioValue(t.offerProps, t.offerCash);
+    const getVal  = _tradePortfolioValue(t.counterProps, t.counterCash);
+    const netForProposer = getVal - giveVal;
+    const netColor = netForProposer >= 0 ? '#4CAF50' : '#F44336';
+    const netLabel = netForProposer >= 0 ? `+$${netForProposer}` : `-$${Math.abs(netForProposer)}`;
+    const isProposer = (localId === t.proposer);
     panel.innerHTML = `
-      <div class="trade-panel__header">📋 FINAL DEAL</div>
-      <div class="trade-panel__deal">
-        <div><strong>You give:</strong> ${offerText}${t.offerCash > 0 ? ` + $${t.offerCash}` : ''}</div>
-        <div><strong>You get:</strong> ${counterText}${t.counterCash > 0 ? ` + $${t.counterCash}` : ''}</div>
+      <div class="tp-header">📋 Final Deal — Review</div>
+      <div class="tp-review-cols">
+        <div class="tp-review-col">
+          <div class="tp-section-label tp-give">YOU GIVE</div>
+          <div class="tp-cards">${offerCards || '<div class="tp-empty">Nothing</div>'}</div>
+          ${t.offerCash > 0 ? `<div class="tp-cash-chip tp-cash-chip--out">+ $${t.offerCash}</div>` : ''}
+          <div class="tp-col-total">~$${giveVal}</div>
+        </div>
+        <div class="tp-review-arrow">⇄</div>
+        <div class="tp-review-col">
+          <div class="tp-section-label tp-get">YOU GET</div>
+          <div class="tp-cards">${counterCards || '<div class="tp-empty">Nothing</div>'}</div>
+          ${t.counterCash > 0 ? `<div class="tp-cash-chip tp-cash-chip--in">+ $${t.counterCash}</div>` : ''}
+          <div class="tp-col-total">~$${getVal}</div>
+        </div>
       </div>
-      <div class="trade-panel__actions">
-        <button class="btn btn--buy-center" id="trade-accept">ACCEPT ✔</button>
-        <button class="btn btn--pass-center" id="trade-cancel">CANCEL ✘</button>
+      <div class="tp-net-large" style="color:${netColor}">
+        NET: <strong>${netLabel}</strong> ${netForProposer >= 0 ? '✓ Good deal' : '⚠ You lose value'}
       </div>
-      <div class="trade-panel__timer">⏱ <span id="trade-timer">${t.timeLeft}</span>s</div>
+      <div class="tp-actions">
+        ${isProposer
+          ? `<button class="btn btn--accept-trade" id="trade-accept">ACCEPT ✔</button>
+             <button class="btn btn--pass-center" id="trade-cancel">CANCEL ✘</button>`
+          : `<div class="tp-waiting-msg">Waiting for <strong>${state.players[t.proposer].name}</strong> to accept or cancel…</div>`
+        }
+      </div>
+      ${isProposer ? _timerBarHtml() : ''}
     `;
     document.getElementById('trade-accept')?.addEventListener('click', executeTrade);
     document.getElementById('trade-cancel')?.addEventListener('click', cancelTrade);
-    startTradeTimer(); // P1 (proposer) starts their review countdown from synced timeLeft
+    // ONLY proposer (P1) gets a review timer — P2 already confirmed, no timer needed
+    if (isProposer) startTradeTimer(t.timeLeft || 30);
   }
 }
+// (old showTradePanel body removed — new version is above)
 
-function onTileClickTrade(spaceId) {
-  const t = state.trade;
-  if (!t.active) return;
-  const space = BOARD.find(s => s.id === spaceId);
-  if (!space) return;
-  const tile = boardEl.querySelector(`[data-space-id="${spaceId}"]`);
-
-  if (t.step === 'select') {
-    if (state.owners[spaceId] !== t.proposer) return;
-    const idx = t.offerProps.indexOf(spaceId);
-    if (idx >= 0) { t.offerProps.splice(idx, 1); tile?.classList.remove('tile--selected-trade'); }
-    else { t.offerProps.push(spaceId); tile?.classList.add('tile--selected-trade'); }
-    updateTradeSelectedList(t.offerProps);
-  }
-  else if (t.step === 'counter') {
-    const opp = t.proposer === 'p1' ? 'p2' : 'p1';
-    if (state.owners[spaceId] !== opp) return;
-    const idx = t.counterProps.indexOf(spaceId);
-    if (idx >= 0) { t.counterProps.splice(idx, 1); tile?.classList.remove('tile--selected-trade'); }
-    else { t.counterProps.push(spaceId); tile?.classList.add('tile--selected-trade'); }
-    updateTradeSelectedList(t.counterProps);
-  }
-}
 
 function updateTradeSelectedList(props) {
   const el = document.getElementById('trade-selected-list');
   if (!el) return;
-  if (props.length === 0) { el.textContent = 'None selected'; return; }
-  el.textContent = props.map(id => BOARD.find(s => s.id === id)?.name).join(', ');
+  if (props.length === 0) {
+    el.innerHTML = '<div class="tp-empty">Click your pulsing tiles on the board</div>';
+  } else {
+    el.innerHTML = props.map(id => _buildTradeCard(id)).join('');
+  }
+  // Refresh live value labels
+  if (state.trade.step === 'select') _refreshSelectPreview();
+  if (state.trade.step === 'counter') {
+    _refreshCounterPreview(_tradePortfolioValue(state.trade.offerProps, state.trade.offerCash));
+  }
 }
 
 function onTradePropose() {
@@ -865,12 +890,15 @@ function onTradeConfirm() {
   const cashInput = document.getElementById('trade-cash-input');
   t.counterCash = parseInt(cashInput?.value) || 0;
   stopAllPulse();
+  // FIX: Kill the existing P2 counter-step timer BEFORE switching to review step.
+  // Without this, P2's old timer keeps running alongside the new review timer on P1,
+  // causing the first-to-expire to fire cancelTrade() mid-animation.
+  clearInterval(t.timer);
+  t.timer = null;
   t.step = 'review';
-  // P2 (counterparty) sees the final deal summary — not needed here since P1 opens it via broadcast
-  // But show it locally so P2 also sees what they agreed to
+  // P2 sees a static confirmation — NO timer started here (P2 already confirmed)
   showTradePanel(t.proposer === 'p1' ? 'p2' : 'p1', 'review');
-  // Broadcast TRADE_COUNTERED so P1 opens the review panel.
-  // Include timeLeft so proposer gets the remaining time, not a fresh 40s.
+  // Broadcast TRADE_COUNTERED so P1 opens the review panel with a fresh 30s timer.
   pushSyncState({
     type: 'TRADE_COUNTERED',
     proposer: t.proposer,
@@ -878,47 +906,59 @@ function onTradeConfirm() {
     offerCash: t.offerCash,
     counterProps: t.counterProps,
     counterCash: t.counterCash,
-    timeLeft: t.timeLeft
+    timeLeft: 30 // P1 always gets fresh 30s to review — not the dwindling counter window
   });
 }
 
 async function executeTrade() {
-  const t = state.trade;
-  const opp = t.proposer === 'p1' ? 'p2' : 'p1';
+  // FIX: One-shot guard — prevents double-fire if timer races the ACCEPT button click
+  if (!state.trade.active) return;
+  // Snapshot the trade object before closeTrade() resets state.trade to defaults.
+  // This means no timer can fire cancelTrade() during the coin animations below.
+  const snap = {
+    proposer:     state.trade.proposer,
+    offerProps:   [...state.trade.offerProps],
+    counterProps: [...state.trade.counterProps],
+    offerCash:    state.trade.offerCash,
+    counterCash:  state.trade.counterCash,
+  };
+  // Kill all timers and close overlay IMMEDIATELY — prevents any race with cancelTrade
+  closeTrade();
 
-  // Swap properties
-  t.offerProps.forEach(sid => { state.owners[sid] = opp; updateTileOwnerBand(sid, opp); });
-  t.counterProps.forEach(sid => { state.owners[sid] = t.proposer; updateTileOwnerBand(sid, t.proposer); });
+  const opp = snap.proposer === 'p1' ? 'p2' : 'p1';
 
-  // Swap cash
-  if (t.offerCash > 0) { state.players[t.proposer].balance -= t.offerCash; state.players[opp].balance += t.offerCash; }
-  if (t.counterCash > 0) { state.players[opp].balance -= t.counterCash; state.players[t.proposer].balance += t.counterCash; }
+  // Apply ownership swaps
+  snap.offerProps.forEach(sid => { state.owners[sid] = opp; updateTileOwnerBand(sid, opp); });
+  snap.counterProps.forEach(sid => { state.owners[sid] = snap.proposer; updateTileOwnerBand(sid, snap.proposer); });
+
+  // Apply cash swaps
+  if (snap.offerCash > 0) { state.players[snap.proposer].balance -= snap.offerCash; state.players[opp].balance += snap.offerCash; }
+  if (snap.counterCash > 0) { state.players[opp].balance -= snap.counterCash; state.players[snap.proposer].balance += snap.counterCash; }
 
   renderHUD();
 
   // Heartbeat animation on traded tiles
-  const allTraded = [...t.offerProps, ...t.counterProps];
+  const allTraded = [...snap.offerProps, ...snap.counterProps];
   allTraded.forEach(sid => {
     const tile = boardEl.querySelector(`[data-space-id="${sid}"]`);
     if (tile) { tile.classList.add('tile--heartbeat'); setTimeout(() => tile.classList.remove('tile--heartbeat'), 1200); }
   });
 
-  if (t.offerCash > 0) await animateCoins(t.proposer, opp, Math.min(Math.ceil(t.offerCash / 80), 5));
-  if (t.counterCash > 0) await animateCoins(opp, t.proposer, Math.min(Math.ceil(t.counterCash / 80), 5));
+  if (snap.offerCash > 0) await animateCoins(snap.proposer, opp, Math.min(Math.ceil(snap.offerCash / 80), 5));
+  if (snap.counterCash > 0) await animateCoins(opp, snap.proposer, Math.min(Math.ceil(snap.counterCash / 80), 5));
 
-  await flashCenterEvent('Trade completed!', null, '🤝', 1500);
+  await flashCenterEvent('🤝 Trade completed!', null, '✅', 1500);
 
-  // Broadcast BEFORE closing — remote side needs event data to animate
+  // Broadcast event so P2 animates the result
   pushSyncState({
     type: 'TRADE_EXECUTED',
-    proposer: t.proposer,
-    offerProps: t.offerProps,
-    counterProps: t.counterProps,
-    offerCash: t.offerCash,
-    counterCash: t.counterCash
+    proposer: snap.proposer,
+    offerProps: snap.offerProps,
+    counterProps: snap.counterProps,
+    offerCash: snap.offerCash,
+    counterCash: snap.counterCash
   });
 
-  closeTrade();
   checkWin();
 }
 
@@ -939,12 +979,25 @@ function closeTrade() {
   renderHUD();
 }
 
-function startTradeTimer() {
+function startTradeTimer(maxTime) {
   clearInterval(state.trade.timer);
+  if (maxTime !== undefined) {
+    state.trade.timeLeft = maxTime; // reset to provided max
+    state.trade.timeMax  = maxTime;
+  }
+  const tMax = state.trade.timeMax || 40;
   state.trade.timer = setInterval(() => {
     state.trade.timeLeft--;
-    const el = document.getElementById('trade-timer');
-    if (el) el.textContent = state.trade.timeLeft;
+    // Update countdown text (new panel uses trade-timer-val, fallback to old trade-timer)
+    const valEl = document.getElementById('trade-timer-val') || document.getElementById('trade-timer');
+    if (valEl) valEl.textContent = state.trade.timeLeft;
+    // Update progress bar color + width
+    const bar = document.getElementById('trade-timer-bar');
+    if (bar) {
+      const pct = Math.max(0, Math.round((state.trade.timeLeft / tMax) * 100));
+      bar.style.width = `${pct}%`;
+      bar.style.background = pct > 50 ? '#4CAF50' : pct > 25 ? '#FF9800' : '#F44336';
+    }
     if (state.trade.timeLeft <= 0) { cancelTrade(); }
   }, 1000);
 }
@@ -1131,15 +1184,37 @@ async function onRollClick() {
       return; // finally fires → state.rolling = false
     }
 
-    /* ── NORMAL PATH ─────────────────────────────────────────────── */
-    const d1 = Math.ceil(Math.random() * 6);
-    const oldPos = player.position;
-    let newPos = oldPos + d1;
-    const passedGenesis = (oldPos + d1) > 28;
-    if (newPos > 28) newPos -= 28;
+    /* ── NORMAL PATH (Tier 2: Server-Authoritative Dice) ─────────── */
+    // Request dice from the Edge Function. Server uses crypto.getRandomValues() — unhackable.
+    // ~150ms round-trip is invisible behind the "roll" anticipation moment.
+    let d1, oldPos, newPos, passedGenesis;
+    try {
+      const rollRes = await supabase.functions.invoke('game_action', {
+        body: { action: 'roll', room_code: roomCode }
+      });
+      if (rollRes.error || !rollRes.data?.ok) throw new Error(rollRes.data?.error || 'roll failed');
+      // Server returns the single die result — pick d1 from the server's dice array
+      // The Edge Function uses d1+d2 but our board uses 1 die: we take the first value
+      const ev = rollRes.data.state?.last_event;
+      d1          = ev?.dice?.[0] ?? Math.ceil(Math.random() * 6); // fallback only on network error
+      oldPos      = player.position === ev?.landingPosition - d1 ? player.position : player.position; // keep local
+      newPos      = ev?.landingPosition ?? (() => { let p = player.position + d1; if (p > 28) p -= 28; return p; })();
+      passedGenesis = ev?.passedGenesis ?? false;
+      // Merge server position + balance into local state (single source of truth)
+      player.position = newPos;
+      if (passedGenesis) player.balance = rollRes.data.state.players[ap].balance;
+    } catch (_rollErr) {
+      // Graceful fallback: use local dice only if Edge Fn is unreachable (dev/offline)
+      console.warn('[roll] Edge Fn unavailable, falling back to local dice:', _rollErr);
+      d1           = Math.ceil(Math.random() * 6);
+      oldPos       = player.position;
+      newPos       = player.position + d1 > 28 ? player.position + d1 - 28 : player.position + d1;
+      passedGenesis = (player.position + d1) > 28;
+      player.position = newPos;
+      if (passedGenesis) player.balance += 200;
+    }
 
-    player.position = newPos;
-    if (passedGenesis) player.balance += 200;
+    oldPos = oldPos ?? player.position; // ensure oldPos is always set
     animatingTokens.add(ap);
 
     pushSyncState({ type: 'ROLL', dice: d1, oldPos, newPos, p: ap, passedGenesis });
@@ -1936,8 +2011,11 @@ async function _playbackImpl(payloadState) {
         showTradePanel(ev.proposer, 'review'); // startTradeTimer called inside showTradePanel
       }
     } else if (ev.type === 'TRADE_EXECUTED') {
-      // Apply trade visually on the remote player's board
+      // FIX: Close trade FIRST to kill the remote review timer before animations start.
+      // Without this, the countdown could reach 0 during coin animations and fire cancelTrade.
+      closeTrade();
       const opp2 = ev.proposer === 'p1' ? 'p2' : 'p1';
+      // Apply ownership on remote board (balance comes from mergeServerState via postgres_changes)
       ev.offerProps.forEach(sid => updateTileOwnerBand(sid, opp2));
       ev.counterProps.forEach(sid => updateTileOwnerBand(sid, ev.proposer));
       if (ev.offerCash > 0) await animateCoins(ev.proposer, opp2, Math.min(Math.ceil(ev.offerCash / 80), 5));
@@ -1993,7 +2071,9 @@ async function _playbackImpl(payloadState) {
     }
   }
 
-  mergeServerState(payloadState);
+  // Step 5 — Broadcast path: skip financial fields (balance, owners).
+  // Those only merge from postgres_changes (DB truth), not from untrusted broadcast payload.
+  mergeServerState(payloadState, /* fromBroadcast= */ true);
 
   // Restart timer only when turn changed
   if (payloadState.turn && payloadState.turn !== prevTurn) {
@@ -2010,38 +2090,56 @@ async function _playbackImpl(payloadState) {
   syncBoardState();
 }
 
-// Extract the domain field merge so it can be called from both paths above
-function mergeServerState(payloadState) {
+// fromBroadcast=true: skip balance and ownership merge (untrusted client broadcast).
+// fromBroadcast=false (default): full merge — only from postgres_changes (DB-authoritative).
+function mergeServerState(payloadState, fromBroadcast = false) {
   state.turn        = payloadState.turn        ?? state.turn;
   state.phase       = payloadState.phase       ?? state.phase;
-  state.owners      = payloadState.owners      ?? state.owners;
-  state.buildings   = payloadState.buildings   ?? state.buildings;
   state.stakingPool = payloadState.stakingPool ?? state.stakingPool;
   state.winTarget   = payloadState.winTarget   ?? state.winTarget;
   state.gameOver    = payloadState.gameOver    ?? false;
   state.last_event  = payloadState.last_event  ?? null;
-  // Sync bet from server (rolling player needs to see the waiting player's bet)
   if (payloadState.bet !== undefined) state.bet = payloadState.bet;
 
-  // Merge players but ALWAYS preserve tokenImg
-  if (payloadState.players) {
-    const TOKEN_DEFAULTS = { p1: 'redmarker.png', p2: 'bluemarker.png' };
-    for (const slot of ['p1', 'p2']) {
-      if (payloadState.players[slot]) {
-        state.players[slot] = {
-          ...state.players[slot],
-          ...payloadState.players[slot],
-          tokenImg: payloadState.players[slot].tokenImg
-                    || state.players[slot].tokenImg
-                    || TOKEN_DEFAULTS[slot],
-        };
+  if (!fromBroadcast) {
+    // DB-authoritative fields — only merge from postgres_changes, never from broadcast
+    state.owners    = payloadState.owners    ?? state.owners;
+    state.buildings = payloadState.buildings ?? state.buildings;
+
+    // Merge players including balance — DB is source of truth for financial data
+    if (payloadState.players) {
+      const TOKEN_DEFAULTS = { p1: 'redmarker.png', p2: 'bluemarker.png' };
+      for (const slot of ['p1', 'p2']) {
+        if (payloadState.players[slot]) {
+          state.players[slot] = {
+            ...state.players[slot],
+            ...payloadState.players[slot],
+            tokenImg: payloadState.players[slot].tokenImg
+                      || state.players[slot].tokenImg
+                      || TOKEN_DEFAULTS[slot],
+          };
+        }
       }
     }
+  } else {
+    // Broadcast path: only merge safe non-financial fields
+    // Position is safe — it drives animation and is validated server-side
+    if (payloadState.players) {
+      for (const slot of ['p1', 'p2']) {
+        if (payloadState.players[slot]) {
+          // Only update position and jailTurns from broadcast — NOT balance
+          if (payloadState.players[slot].position !== undefined)
+            state.players[slot].position  = payloadState.players[slot].position;
+          if (payloadState.players[slot].jailTurns !== undefined)
+            state.players[slot].jailTurns = payloadState.players[slot].jailTurns;
+        }
+      }
+    }
+    // Buildings from broadcast are safe for display (can't be forged to grant rent)
+    state.buildings = payloadState.buildings ?? state.buildings;
   }
 
   // NEVER reset state.rolling here for the ACTIVE player — mid-roll state must be preserved.
-  // Only safe to reset rolling for the remote/waiting player.
-  // Use payloadState.turn (the INCOMING turn) NOT the local state.turn which is already mutated.
   if (payloadState.turn && payloadState.turn !== localId) state.rolling = false;
 }
 

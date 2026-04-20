@@ -1005,6 +1005,209 @@ body {
   color: var(--text-muted);
 }
 
+/* ── New rich trade panel components ─────────── */
+.tp-header {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text-dark);
+  text-align: center;
+  margin-bottom: 10px;
+  letter-spacing: 0.3px;
+}
+.tp-section-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tp-section-label.tp-give { color: #E53935; }
+.tp-section-label.tp-get  { color: #2E7D32; }
+.tp-badge {
+  background: #E8F5E9;
+  color: #2E7D32;
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 20px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.tp-hint {
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+.tp-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 8px;
+  max-height: 130px;
+  overflow-y: auto;
+}
+.tp-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 0;
+  font-style: italic;
+}
+.tp-card {
+  background: rgba(0,0,0,.03);
+  border: 1px solid rgba(0,0,0,.07);
+  border-radius: 8px;
+  padding: 7px 10px;
+  border-left-width: 4px !important;
+}
+.tp-card__tier {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.tp-card__name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+.tp-card__b {
+  font-size: 11px;
+  margin-left: 4px;
+}
+.tp-card__meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.tp-value-row {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.tp-net-row {
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.tp-net-large {
+  text-align: center;
+  font-size: 14px;
+  font-weight: 700;
+  margin: 8px 0 12px;
+  padding: 8px;
+  background: rgba(0,0,0,.03);
+  border-radius: 8px;
+}
+.tp-cash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.tp-cash-chip {
+  display: inline-block;
+  background: #E3F2FD;
+  color: #0D47A1;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 20px;
+  margin-bottom: 6px;
+}
+.tp-cash-chip--in  { background: #E8F5E9; color: #1B5E20; }
+.tp-cash-chip--out { background: #FFEBEE; color: #B71C1C; }
+.tp-divider {
+  height: 1px;
+  background: rgba(0,0,0,.08);
+  margin: 8px 0;
+}
+.tp-waiting-msg {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 8px 0;
+  line-height: 1.5;
+}
+.tp-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.tp-actions .btn { flex: 1; padding: 10px 0; font-size: 12px; text-align: center; }
+/* Two-column review layout */
+.tp-review-cols {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+.tp-review-col { flex: 1; min-width: 0; }
+.tp-review-arrow {
+  font-size: 18px;
+  color: var(--text-muted);
+  padding-top: 28px;
+  flex-shrink: 0;
+}
+.tp-col-total {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--text-dark);
+  text-align: right;
+  margin-top: 4px;
+}
+/* Timer progress bar */
+.tp-timer {
+  margin-top: 10px;
+}
+.tp-timer__bar-wrap {
+  height: 4px;
+  background: rgba(0,0,0,.08);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.tp-timer__bar {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 1s linear, background 0.5s;
+}
+.tp-timer__label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  display: block;
+  text-align: center;
+}
+/* Accept trade button */
+.btn--accept-trade {
+  flex: 1;
+  padding: 10px 0;
+  font-size: 12px;
+  text-align: center;
+  background: linear-gradient(135deg, #2E7D32, #43A047);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  transition: opacity 0.15s;
+}
+.btn--accept-trade:hover { opacity: 0.9; }
+
+
 
 /* ══════════════════════════════════════════════
    BETTING PANEL — Next to waiting player's HUD
