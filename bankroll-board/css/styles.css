@@ -211,7 +211,7 @@ body {
   75%  { transform: rotateX(540deg) rotateY(270deg); }
   100% { transform: rotateX(720deg) rotateY(360deg); }
 }
-.rolling { animation: dieRoll 700ms ease-in-out; }
+.rolling { animation: dieRoll 400ms linear infinite; }
 
 
 /* ══════════════════════════════════════════════

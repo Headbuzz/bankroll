@@ -390,13 +390,19 @@ function startDiceSpin() {
 }
 function landDice(val) {
   return new Promise(resolve => {
+    // Freeze the die at its current spinning position
+    const raw = getComputedStyle(die1El).transform;
     die1El.classList.remove('rolling');
-    die1El.style.transform = `rotateX(${720+Math.random()*360}deg) rotateY(${720+Math.random()*360}deg)`;
-    setTimeout(() => {
-      die1El.style.transition = 'transform 400ms cubic-bezier(.2,1.2,.5,1)';
-      die1El.style.transform = FACE_ROTATIONS[val];
-      setTimeout(() => { die1El.style.transition = ''; resolve(); }, 420);
-    }, 100);
+    die1El.style.transition = 'none';
+    die1El.style.transform = raw; // lock at current mid-spin frame
+    void die1El.offsetHeight;     // force reflow so browser commits the freeze
+
+    // Transition FORWARD to the correct face (add 720° so it never unwinds)
+    const target = FACE_ROTATIONS[val]
+      .replace(/(-?\d+)deg/g, (_, n) => (parseInt(n) + 720) + 'deg');
+    die1El.style.transition = 'transform 500ms cubic-bezier(.12,.85,.25,1)';
+    die1El.style.transform = target;
+    setTimeout(() => { die1El.style.transition = ''; resolve(); }, 520);
   });
 }
 // Full dice animation (used by remote playback where latency hiding isn't needed)
