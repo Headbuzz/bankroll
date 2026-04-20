@@ -64,33 +64,33 @@ const PLAYER_COLORS = { p1: '#E53935', p2: '#1E88E5' };
 /* ── Board: 28 spaces ── */
 const BOARD = [
   { id: 1,  name: 'Genesis',      type: 'corner', subtype: 'genesis' },
-  { id: 2,  name: 'Lagos',        type: 'city', tier: 1, price: 94,  image: 'lagos.png?v=3' },
-  { id: 3,  name: 'Nairobi',      type: 'city', tier: 1, price: 99,  image: 'nairobi.png' },
-  { id: 4,  name: 'Hanoi',        type: 'city', tier: 2, price: 105, image: 'hanoi.png' },
-  { id: 5,  name: 'Shipping',     type: 'utility', icon: '🚢', price: 176, image: 'shipping.png' },
-  { id: 6,  name: 'Medellín',     type: 'city', tier: 2, price: 117, image: 'medellin.png' },
-  { id: 7,  name: 'Bangkok',      type: 'city', tier: 2, price: 140, image: 'bangkok.png' },
+  { id: 2,  name: 'Lagos',        type: 'city', tier: 1, price: 90,  image: 'lagos.png?v=3' },   // T1
+  { id: 3,  name: 'Nairobi',      type: 'city', tier: 1, price: 100, image: 'nairobi.png' },      // T1
+  { id: 4,  name: 'Hanoi',        type: 'city', tier: 2, price: 105, image: 'hanoi.png' },        // T2
+  { id: 5,  name: 'Shipping',     type: 'utility', icon: '🚢', price: 175, image: 'shipping.png' }, // UTIL
+  { id: 6,  name: 'Medellín',     type: 'city', tier: 2, price: 115, image: 'medellin.png' },     // T2
+  { id: 7,  name: 'Bangkok',      type: 'city', tier: 2, price: 140, image: 'bangkok.png' },      // T2
   { id: 8,  name: 'Lucky Card',   type: 'corner', subtype: 'lucky' },
-  { id: 9,  name: 'Istanbul',     type: 'city', tier: 3, price: 152, image: 'istanbul.png' },
-  { id: 10, name: 'São Paulo',    type: 'city', tier: 3, price: 170, image: 'saopaoulo.png' },
-  { id: 11, name: 'Mumbai',       type: 'city', tier: 4, price: 187, image: 'mumbai.png' },
-  { id: 12, name: 'Internet',     type: 'utility', icon: '☁️', price: 176, image: 'internet.png' },
-  { id: 13, name: 'Seoul',        type: 'city', tier: 4, price: 211, image: 'seoul.png' },
-  { id: 14, name: 'Berlin',       type: 'city', tier: 4, price: 222, image: 'berlin.png' },
+  { id: 9,  name: 'Istanbul',     type: 'city', tier: 3, price: 150, image: 'istanbul.png' },     // T3
+  { id: 10, name: 'São Paulo',    type: 'city', tier: 3, price: 170, image: 'saopaoulo.png' },    // T3
+  { id: 11, name: 'Mumbai',       type: 'city', tier: 4, price: 185, image: 'mumbai.png' },       // T4
+  { id: 12, name: 'Internet',     type: 'utility', icon: '☁️', price: 175, image: 'internet.png' }, // UTIL
+  { id: 13, name: 'Seoul',        type: 'city', tier: 4, price: 210, image: 'seoul.png' },        // T4
+  { id: 14, name: 'Berlin',       type: 'city', tier: 4, price: 220, image: 'berlin.png' },       // T4
   { id: 15, name: 'Staking Pool', type: 'corner', subtype: 'staking' },
-  { id: 16, name: 'Toronto',      type: 'city', tier: 5, price: 240, image: 'toronto.png' },
-  { id: 17, name: 'Sydney',       type: 'city', tier: 5, price: 257, image: 'sydney.png' },
-  { id: 18, name: 'Zurich',       type: 'city', tier: 6, price: 281, image: 'zurich.png' },
-  { id: 19, name: 'Electric',     type: 'utility', icon: '⚡', price: 176, image: 'electric.png' },
-  { id: 20, name: 'Tokyo',        type: 'city', tier: 6, price: 298, image: 'tokyo.png' },
-  { id: 21, name: 'Hong Kong',    type: 'city', tier: 6, price: 310, image: 'hongkong.png' },
+  { id: 16, name: 'Toronto',      type: 'city', tier: 5, price: 240, image: 'toronto.png' },      // T5
+  { id: 17, name: 'Sydney',       type: 'city', tier: 5, price: 255, image: 'sydney.png' },       // T5
+  { id: 18, name: 'Zurich',       type: 'city', tier: 6, price: 280, image: 'zurich.png' },       // T6
+  { id: 19, name: 'Electric',     type: 'utility', icon: '⚡', price: 175, image: 'electric.png' }, // UTIL
+  { id: 20, name: 'Tokyo',        type: 'city', tier: 6, price: 300, image: 'tokyo.png' },        // T6
+  { id: 21, name: 'Hong Kong',    type: 'city', tier: 6, price: 310, image: 'hongkong.png' },     // T6
   { id: 22, name: 'Jail',         type: 'corner', subtype: 'jail' },
-  { id: 23, name: 'London',       type: 'city', tier: 7, price: 328, image: 'london.png' },
-  { id: 24, name: 'Shanghai',     type: 'city', tier: 7, price: 351, image: 'shanghai.png' },
-  { id: 25, name: 'Singapore',    type: 'city', tier: 8, price: 369, image: 'singapore.png' },
-  { id: 26, name: 'Airport',      type: 'utility', icon: '✈️', price: 176, image: 'airport.png' },
-  { id: 27, name: 'Dubai',        type: 'city', tier: 8, price: 392, image: 'dubai.png' },
-  { id: 28, name: 'New York',     type: 'city', tier: 8, price: 410, image: 'newyork.png' },
+  { id: 23, name: 'London',       type: 'city', tier: 7, price: 330, image: 'london.png' },       // T7
+  { id: 24, name: 'Shanghai',     type: 'city', tier: 7, price: 350, image: 'shanghai.png' },     // T7
+  { id: 25, name: 'Singapore',    type: 'city', tier: 8, price: 370, image: 'singapore.png' },    // T8
+  { id: 26, name: 'Airport',      type: 'utility', icon: '✈️', price: 175, image: 'airport.png' }, // UTIL
+  { id: 27, name: 'Dubai',        type: 'city', tier: 8, price: 390, image: 'dubai.png' },        // T8
+  { id: 28, name: 'New York',     type: 'city', tier: 8, price: 410, image: 'newyork.png' },      // T8
 ];
 
 const GRID_POS = {
