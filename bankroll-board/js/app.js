@@ -10,7 +10,17 @@ import { supabase, getUser } from './supabase.js';
 
 let roomCode = sessionStorage.getItem('bankroll_room');
 let localId = null;
-let lastProcessedEventId = null;
+// Event dedup: tracks all processed event IDs in a bounded rolling Set.
+// Using a single variable (lastProcessedEventId) was the cause of the turn-replay bug:
+// if a later event (LUCKY/BUY) updated the variable, the postgres_changes for an earlier
+// ROLL would no longer match and would replay the dice animation.
+const _seenEventIds = new Set();
+function _markSeen(id) {
+  _seenEventIds.add(id);
+  // Cap at 40 — oldest entry is always first in insertion order
+  if (_seenEventIds.size > 40) _seenEventIds.delete(_seenEventIds.values().next().value);
+}
+function _alreadySeen(id) { return _seenEventIds.has(id); }
 let gameId = null;        // UUID primary key for Realtime filter
 let gameVersion = 0;      // OCC sequence counter
 let channel = null;       // Supabase Realtime channel (broadcast + postgres_changes)
@@ -54,33 +64,33 @@ const PLAYER_COLORS = { p1: '#E53935', p2: '#1E88E5' };
 /* ── Board: 28 spaces ── */
 const BOARD = [
   { id: 1,  name: 'Genesis',      type: 'corner', subtype: 'genesis' },
-  { id: 2,  name: 'Lagos',        type: 'city', tier: 1, price: 80,  image: 'lagos.png?v=3' },
-  { id: 3,  name: 'Nairobi',      type: 'city', tier: 1, price: 85,  image: 'nairobi.png' },
-  { id: 4,  name: 'Hanoi',        type: 'city', tier: 2, price: 90,  image: 'hanoi.png' },
-  { id: 5,  name: 'Shipping',     type: 'utility', icon: '🚢', price: 150, image: 'shipping.png' },
-  { id: 6,  name: 'Medellín',     type: 'city', tier: 2, price: 100, image: 'medellin.png' },
-  { id: 7,  name: 'Bangkok',      type: 'city', tier: 2, price: 120, image: 'bangkok.png' },
+  { id: 2,  name: 'Lagos',        type: 'city', tier: 1, price: 94,  image: 'lagos.png?v=3' },
+  { id: 3,  name: 'Nairobi',      type: 'city', tier: 1, price: 99,  image: 'nairobi.png' },
+  { id: 4,  name: 'Hanoi',        type: 'city', tier: 2, price: 105, image: 'hanoi.png' },
+  { id: 5,  name: 'Shipping',     type: 'utility', icon: '🚢', price: 176, image: 'shipping.png' },
+  { id: 6,  name: 'Medellín',     type: 'city', tier: 2, price: 117, image: 'medellin.png' },
+  { id: 7,  name: 'Bangkok',      type: 'city', tier: 2, price: 140, image: 'bangkok.png' },
   { id: 8,  name: 'Lucky Card',   type: 'corner', subtype: 'lucky' },
-  { id: 9,  name: 'Istanbul',     type: 'city', tier: 3, price: 130, image: 'istanbul.png' },
-  { id: 10, name: 'São Paulo',    type: 'city', tier: 3, price: 145, image: 'saopaoulo.png' },
-  { id: 11, name: 'Mumbai',       type: 'city', tier: 4, price: 160, image: 'mumbai.png' },
-  { id: 12, name: 'Internet',     type: 'utility', icon: '☁️', price: 150, image: 'internet.png' },
-  { id: 13, name: 'Seoul',        type: 'city', tier: 4, price: 180, image: 'seoul.png' },
-  { id: 14, name: 'Berlin',       type: 'city', tier: 4, price: 190, image: 'berlin.png' },
+  { id: 9,  name: 'Istanbul',     type: 'city', tier: 3, price: 152, image: 'istanbul.png' },
+  { id: 10, name: 'São Paulo',    type: 'city', tier: 3, price: 170, image: 'saopaoulo.png' },
+  { id: 11, name: 'Mumbai',       type: 'city', tier: 4, price: 187, image: 'mumbai.png' },
+  { id: 12, name: 'Internet',     type: 'utility', icon: '☁️', price: 176, image: 'internet.png' },
+  { id: 13, name: 'Seoul',        type: 'city', tier: 4, price: 211, image: 'seoul.png' },
+  { id: 14, name: 'Berlin',       type: 'city', tier: 4, price: 222, image: 'berlin.png' },
   { id: 15, name: 'Staking Pool', type: 'corner', subtype: 'staking' },
-  { id: 16, name: 'Toronto',      type: 'city', tier: 5, price: 205, image: 'toronto.png' },
-  { id: 17, name: 'Sydney',       type: 'city', tier: 5, price: 220, image: 'sydney.png' },
-  { id: 18, name: 'Zurich',       type: 'city', tier: 6, price: 240, image: 'zurich.png' },
-  { id: 19, name: 'Electric',     type: 'utility', icon: '⚡', price: 150, image: 'electric.png' },
-  { id: 20, name: 'Tokyo',        type: 'city', tier: 6, price: 255, image: 'tokyo.png' },
-  { id: 21, name: 'Hong Kong',    type: 'city', tier: 6, price: 265, image: 'hongkong.png' },
+  { id: 16, name: 'Toronto',      type: 'city', tier: 5, price: 240, image: 'toronto.png' },
+  { id: 17, name: 'Sydney',       type: 'city', tier: 5, price: 257, image: 'sydney.png' },
+  { id: 18, name: 'Zurich',       type: 'city', tier: 6, price: 281, image: 'zurich.png' },
+  { id: 19, name: 'Electric',     type: 'utility', icon: '⚡', price: 176, image: 'electric.png' },
+  { id: 20, name: 'Tokyo',        type: 'city', tier: 6, price: 298, image: 'tokyo.png' },
+  { id: 21, name: 'Hong Kong',    type: 'city', tier: 6, price: 310, image: 'hongkong.png' },
   { id: 22, name: 'Jail',         type: 'corner', subtype: 'jail' },
-  { id: 23, name: 'London',       type: 'city', tier: 7, price: 280, image: 'london.png' },
-  { id: 24, name: 'Shanghai',     type: 'city', tier: 7, price: 300, image: 'shanghai.png' },
-  { id: 25, name: 'Singapore',    type: 'city', tier: 8, price: 315, image: 'singapore.png' },
-  { id: 26, name: 'Airport',      type: 'utility', icon: '✈️', price: 150, image: 'airport.png' },
-  { id: 27, name: 'Dubai',        type: 'city', tier: 8, price: 335, image: 'dubai.png' },
-  { id: 28, name: 'New York',     type: 'city', tier: 8, price: 350, image: 'newyork.png' },
+  { id: 23, name: 'London',       type: 'city', tier: 7, price: 328, image: 'london.png' },
+  { id: 24, name: 'Shanghai',     type: 'city', tier: 7, price: 351, image: 'shanghai.png' },
+  { id: 25, name: 'Singapore',    type: 'city', tier: 8, price: 369, image: 'singapore.png' },
+  { id: 26, name: 'Airport',      type: 'utility', icon: '✈️', price: 176, image: 'airport.png' },
+  { id: 27, name: 'Dubai',        type: 'city', tier: 8, price: 392, image: 'dubai.png' },
+  { id: 28, name: 'New York',     type: 'city', tier: 8, price: 410, image: 'newyork.png' },
 ];
 
 const GRID_POS = {
@@ -1055,35 +1065,43 @@ async function onRollClick() {
   try {
     /* ── JAIL PATH ───────────────────────────────────────────────── */
     if (player.jailTurns > 0) {
-      pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: player.jailTurns });
-
-      // Re-start timer: stopTurnTimer() above killed it. Without resumeTurnTimer()
-      // showCenterDecision waits forever if the player is AFK.
-      resumeTurnTimer();
-
-      const decision = await showCenterDecision(
-        `\uD83D\uDD12 You are in Jail! ${player.jailTurns} turn(s) remaining. Pay $150 to escape?`,
-        'jail.png',
-        [
-          { id: 'jail-pay', label: 'PAY $150 \u2014 EXIT NOW', cls: 'btn--buy-center', value: 'pay' },
-          { id: 'jail-stay', label: 'SERVE TURN', cls: 'btn--pass-center', value: 'stay' }
-        ]
-      );
-      stopTurnTimer();
-
-      if (decision === 'pay' && player.balance >= 150) {
-        player.balance -= 150;
-        state.stakingPool += Math.round(150 * 0.3);
-        player.jailTurns = 0;
-        renderHUD();
-        await animateCoins(ap, 'bank', 3);
-        await flashCenterEvent(`${player.name} paid $150 and is free!`, 'jail.png', '-$150', 1500);
-        pushSyncState({ type: 'JAIL_EXIT', p: ap });
+      if (player.jailTurns === 2) {
+        // FIRST jail turn: show the pay-or-serve decision exactly once.
+        // jailTurns=2 means player arrived in jail on their previous turn.
+        pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: 2 });
+        resumeTurnTimer(); // allow AFK auto-resolve
+        const decision = await showCenterDecision(
+          '\uD83D\uDD12 You are in Jail! Pay $150 to escape now, or serve (next turn auto-skipped).',
+          'jail.png',
+          [
+            { id: 'jail-pay', label: 'PAY $150 \u2014 EXIT NOW', cls: 'btn--buy-center', value: 'pay' },
+            { id: 'jail-stay', label: 'SERVE SENTENCE', cls: 'btn--pass-center', value: 'stay' }
+          ]
+        );
+        stopTurnTimer();
+        if (decision === 'pay' && player.balance >= 150) {
+          player.balance -= 150;
+          state.stakingPool += Math.round(150 * 0.3);
+          player.jailTurns = 0;
+          renderHUD();
+          await animateCoins(ap, 'bank', 3);
+          await flashCenterEvent(`${player.name} paid $150 and is free!`, 'jail.png', '-$150', 1500);
+          pushSyncState({ type: 'JAIL_EXIT', p: ap });
+        } else {
+          // Chose to serve or couldn't afford — next turn auto-skipped, no decision shown
+          player.jailTurns = 1;
+          await flashCenterEvent(
+            `${player.name} chose to serve. Next turn will be auto-skipped.`,
+            'jail.png', '\uD83D\uDD12', 1500
+          );
+        }
       } else {
-        player.jailTurns--;
+        // jailTurns === 1: MANDATORY AUTO-SKIP — no prompt, just notify and move on
+        player.jailTurns = 0;
+        pushSyncState({ type: 'JAIL_TURN', p: ap, turnsLeft: 0 });
         await flashCenterEvent(
-          `${player.name} serves sentence. ${player.jailTurns > 0 ? player.jailTurns + ' turn(s) left.' : 'Released next turn!'}`,
-          'jail.png', '\uD83D\uDD12', 1800
+          `${player.name}'s jail sentence served \u2014 turn auto-skipped!`,
+          'jail.png', '\uD83D\uDD13 Released', 1800
         );
       }
       switchTurn(null);
@@ -1742,7 +1760,7 @@ function pushSyncState(eventPayload = null) {
 
   if (eventPayload) {
     state.last_event = Object.assign({ id: crypto.randomUUID(), p: localId }, eventPayload);
-    lastProcessedEventId = state.last_event.id; // mark as self-processed so we don't replay it
+    _markSeen(state.last_event.id); // mark self-generated events as seen so we never replay them
   } else {
     state.last_event = null;
   }
@@ -1811,8 +1829,8 @@ async function _playbackImpl(payloadState) {
   if (!payloadState) return;
   const ev = payloadState.last_event;
   const prevTurn = state.turn; // capture BEFORE merge to detect turn change
-  if (ev && ev.id !== lastProcessedEventId) {
-    lastProcessedEventId = ev.id;
+  if (ev && !_alreadySeen(ev.id)) {
+    _markSeen(ev.id);
 
     if (ev.type === 'ROLL') {
       state.rolling = false;
@@ -1909,9 +1927,15 @@ async function _playbackImpl(payloadState) {
       await animateCoins('bank', ev.p, Math.min(Math.ceil(ev.payout / 50), 10));
       await flashCenterEvent(`\uD83D\uDCB0 ${name} won ${ev.pct}% of the Staking Pool!`, null, `+$${ev.payout}`, 2000);
     } else if (ev.type === 'JAIL_TURN') {
-      // Fix 6: show ghost turn notification on opponent's screen
+      // Show opponent notification for jailed player's turn
       const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await flashCenterEvent(`\uD83D\uDD12 ${pName} is in Jail \u2014 ${ev.turnsLeft} turn(s) left`, null, '\u23ED\uFE0F Skipped', 2000);
+      if (ev.turnsLeft === 0) {
+        // Auto-skip turn: sentence served
+        await flashCenterEvent(`\uD83D\uDD13 ${pName}'s jail sentence served \u2014 turn skipped!`, 'jail.png', '\uD83D\uDD13 Released', 1800);
+      } else {
+        // First jail turn: player is deciding
+        await flashCenterEvent(`\uD83D\uDD12 ${pName} is in Jail \u2014 deciding their fate...`, 'jail.png', '\u23ED\uFE0F', 2000);
+      }
     } else if (ev.type === 'JAIL_EXIT') {
       const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
       await animateCoins(ev.p, 'bank', 3);
@@ -2060,8 +2084,8 @@ async function init() {
 
     // ROLL: animate immediately, mark as processed so postgres_changes skips animation
     if (ev?.type === 'ROLL') {
-      if (ev.id === lastProcessedEventId) return;
-      lastProcessedEventId = ev.id;
+      if (_alreadySeen(ev.id)) return;
+      _markSeen(ev.id);
       await animateDice(ev.dice);
       await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis);
       if (ev.passedGenesis) {
