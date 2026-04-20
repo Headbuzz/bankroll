@@ -24,6 +24,29 @@ function _alreadySeen(id) { return _seenEventIds.has(id); }
 let gameId = null;        // UUID primary key for Realtime filter
 let gameVersion = 0;      // OCC sequence counter
 let channel = null;       // Supabase Realtime channel (broadcast + postgres_changes)
+let _reconnectTimer = null; // auto-reconnect timer handle
+
+/* ── Event type constants — never use raw strings, prevents typos ──
+   Keep the string VALUES identical to what is stored in the DB.
+   Usage: pushSyncState({ type: EV.ROLL, ... }) */
+const EV = Object.freeze({
+  ROLL:           'ROLL',
+  BUY:            'BUY',
+  RENT:           'RENT',
+  LUCKY:          'LUCKY',
+  STAKING_WIN:    'STAKING_WIN',
+  JAIL_TURN:      'JAIL_TURN',
+  JAIL_EXIT:      'JAIL_EXIT',
+  JAIL_SENT:      'JAIL_SENT',
+  TRADE_PROPOSED: 'TRADE_PROPOSED',
+  TRADE_COUNTERED:'TRADE_COUNTERED',
+  TRADE_DONE:     'TRADE_DONE',
+  TRADE_CANCEL:   'TRADE_CANCEL',
+  BET:            'BET',
+  BUILD:          'BUILD',
+  SELL:           'SELL',
+  KICK:           'KICK',
+});
 
 const IMG = 'assets/images/';
 
@@ -470,7 +493,7 @@ async function handleCorner(space, playerId) {
     const card = drawLuckyCard();
     const result = card.execute(playerId, state);
     const displayText = result.text || card.text;
-    renderHUD();
+    renderBalances(); // lucky card changed balances — no button state change
 
     if (result.jail) {
       // Animate token crawling to jail (position 22) instead of teleporting silently.
@@ -479,7 +502,7 @@ async function handleCorner(space, playerId) {
       const jailId = 22;
       const jailSteps = ((jailId - preMovePos) + 28) % 28 || 28;
       await animateTokenAlongPath(playerId, preMovePos, jailSteps, false);
-      renderHUD();
+      renderBalances(); // position set, jail badge will show on next full renderHUD at turn switch
       await flashCenterEvent(`${player.name} is sent to Jail!`, 'jail.png', '\uD83D\uDD12 2 Turns', 1500);
 
     } else if (result.teleport) {
@@ -491,7 +514,7 @@ async function handleCorner(space, playerId) {
       await animateTokenAlongPath(playerId, preMovePos, steps, passedGenesis);
       // FIX: update position after teleport so next roll starts from correct tile
       player.position = target.id;
-      if (passedGenesis) { player.balance += 200; renderHUD(); }
+      if (passedGenesis) { player.balance += 200; renderBalances(); }
       if (!state.owners[target.id]) {
         if (player.balance >= target.price) {
           resumeTurnTimer(); // only run timer during the buy decision
@@ -502,7 +525,7 @@ async function handleCorner(space, playerId) {
             state.stakingPool += Math.round(target.price * 0.3);
             state.owners[target.id] = playerId;
             updateTileOwnerBand(target.id, playerId);
-            renderHUD();
+            renderBalances(); // BUY deduction — no button state change before coins animate
             await animateCoins(playerId, 'bank', 3);
             const newRent = calculateRent(target);
             await flashCenterEvent(`${player.name} bought ${target.name}!`, null, `Rent: $${newRent}`, 1500);
@@ -516,7 +539,7 @@ async function handleCorner(space, playerId) {
         const owner = state.owners[target.id];
         player.balance -= rent;
         state.players[owner].balance += rent;
-        renderHUD();
+        renderBalances(); // rent paid — both balances update, no button change
         await animateCoins(playerId, owner, 3);
         await flashCenterEvent(`${player.name} paid $${rent} rent!`, null, `-$${rent}`, 1500);
         pushSyncState({ type: 'RENT', p: playerId, owner, rent, landed: target });
@@ -543,7 +566,7 @@ async function handleCorner(space, playerId) {
       const pctDisplay = Math.round(pct * 100);
       player.balance += payout;
       state.stakingPool -= payout;
-      renderHUD();
+      renderBalances(); // staking pool payout — balance and pool display only
       await flashCenterEvent(`${player.name} won ${pctDisplay}% of the Staking Pool!`, 'centralpool.png', `+$${payout}`, 2500);
       await animateCoins('bank', playerId, Math.min(Math.ceil(payout / 50), 10));
       // Fix 8: broadcast STAKING_WIN so P2 sees the jackpot
@@ -606,7 +629,7 @@ async function animateTokenAlongPath(playerId, fromId, steps, skipGenesisBonus =
       const pos = getTileCenter(spaceId);
       if (pos) { token.style.left = pos.x + 'px'; token.style.top = pos.y + 'px'; }
       if (spaceId === 1 && !skipGenesisBonus) {
-        player.balance += 200; renderHUD();
+        player.balance += 200; renderBalances(); // only balance changes mid-animation
         flashCenterEvent(`${player.name} collected $200!`, null, '+$200', 1200);
         animateCoins('bank', playerId, 5);
         checkWin();
@@ -1154,7 +1177,7 @@ async function onRollClick() {
             state.stakingPool += Math.round(landed.price * 0.3);
             state.owners[landed.id] = ap;
             updateTileOwnerBand(landed.id, ap);
-            renderHUD();
+            renderBalances(); // BUY deduction — buttons rebuild at switchTurn, not needed here
             await animateCoins(ap, 'bank', 4);
             const newRent = calculateRent(landed);
             await flashCenterEvent(`${player.name} bought ${landed.name}!`, landed.image, `Rent: $${newRent}`, 1800);
@@ -1174,7 +1197,7 @@ async function onRollClick() {
         const owner = state.owners[landed.id];
         player.balance -= rentOwed;
         state.players[owner].balance += rentOwed;
-        renderHUD();
+        renderBalances(); // RENT paid — both balances change, buttons unchanged until switchTurn
         await animateCoins(ap, owner, Math.min(Math.ceil(rentOwed / 40), 8));
         await flashCenterEvent(`${player.name} paid $${rentOwed} rent to ${state.players[owner].name}`, null, `-$${rentOwed}`, 1500);
         checkBankruptcy(ap);
@@ -1374,6 +1397,30 @@ function renderHUD() {
   renderPlayerCard('player2-hud', state.players.p2, 'p2');
   // Fix 14: do NOT call updateTimerUI here — the timer updates via its own setInterval.
   // Calling it here caused a full DOM rebuild on every timer tick (once per second).
+  updateStakingPoolDisplay();
+}
+
+/* ── Fast balance-only updater — called from hot animation paths (RENT, BUY, staking, genesis)
+   Avoids rebuilding the full player card HTML — only touches 3 text nodes.
+   Use renderHUD() when button state or turn badge may also change. */
+function renderBalances() {
+  for (const slot of ['p1', 'p2']) {
+    const player = state.players[slot];
+    // Balance
+    const balEl = document.querySelector(`#${slot === 'p1' ? 'player1' : 'player2'}-hud .hud-player__balance`);
+    if (balEl) {
+      balEl.textContent = `$${player.balance.toLocaleString()}`;
+      balEl.classList.toggle('hud-player__balance--negative', player.balance < 0);
+    }
+    // Net Worth bar + label
+    const nw = calculateNetWorth(slot);
+    const nwPct = Math.min(100, Math.round((nw / state.winTarget) * 100));
+    const nwColor = nwPct >= 90 ? '#E53935' : nwPct >= 75 ? '#FF9800' : nwPct >= 50 ? '#FFC107' : '#4CAF50';
+    const bar = document.querySelector(`#${slot === 'p1' ? 'player1' : 'player2'}-hud .hud-player__nw-bar`);
+    if (bar) { bar.style.width = `${nwPct}%`; bar.style.background = nwColor; }
+    const nwLabel = document.querySelector(`#${slot === 'p1' ? 'player1' : 'player2'}-hud .hud-player__net span:last-child`);
+    if (nwLabel) { nwLabel.textContent = `$${nw.toLocaleString()} / $${state.winTarget.toLocaleString()}`; nwLabel.style.color = nwColor; }
+  }
   updateStakingPoolDisplay();
 }
 
@@ -2129,6 +2176,43 @@ async function init() {
 
   channel.subscribe((status) => {
     console.log(`[realtime] channel status: ${status}`);
+    // ── Auto-reconnect — silently re-subscribes on dropped WebSocket connections.
+    // Mobile users frequently lose the channel when switching WiFi↔4G or the screen sleeps.
+    // Shows a non-blocking HUD badge; no page reloads, no alerts.
+    const isError = status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED';
+    if (isError && gameId) {
+      // Show reconnecting indicator in HUD
+      const badge = document.getElementById('reconnect-badge');
+      if (badge) badge.style.display = 'flex';
+      // Clear any existing reconnect timer before scheduling a new one
+      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+      _reconnectTimer = setTimeout(async () => {
+        _reconnectTimer = null;
+        console.log('[realtime] attempting reconnect...');
+        try {
+          await channel.unsubscribe();
+        } catch (_) { /* ignore — channel may already be dead */ }
+        // Re-fetch latest DB state so we don’t miss events that occurred during outage
+        const { data } = await supabase.from('games').select('state, version').eq('id', gameId).single();
+        if (data) {
+          gameVersion = data.version ?? gameVersion;
+          await playbackRender(data.state);
+        }
+        channel.subscribe((s2) => {
+          console.log(`[realtime] reconnect status: ${s2}`);
+          if (s2 === 'SUBSCRIBED') {
+            const badge = document.getElementById('reconnect-badge');
+            if (badge) badge.style.display = 'none';
+            console.log('[realtime] ✅ reconnected successfully');
+          }
+        });
+      }, 2000); // 2s back-off before reconnect attempt
+    } else if (status === 'SUBSCRIBED') {
+      // Clear badge on successful connection (initial or reconnect)
+      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+      const badge = document.getElementById('reconnect-badge');
+      if (badge) badge.style.display = 'none';
+    }
   });
 }
 

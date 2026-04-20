@@ -20,6 +20,12 @@
 
   <!-- Notifications -->
   <div id="chat-toast" class="chat-toast"></div>
+
+  <!-- Reconnect badge: shown when Realtime WebSocket drops, hidden on successful reconnect -->
+  <div id="reconnect-badge" style="display:none;position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;background:rgba(0,0,0,0.82);color:#FFD700;font-size:13px;font-weight:700;padding:7px 18px;border-radius:20px;border:1px solid #FFD700;letter-spacing:.06em;align-items:center;gap:8px;backdrop-filter:blur(6px);">
+    <span style="animation:spin 1s linear infinite;display:inline-block">🔄</span> RECONNECTING...
+  </div>
+  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
   
   <!-- ═══ Chat Widget ═══ -->
   <div class="chat-widget">
@@ -125,6 +131,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/app.js?v=18"></script>
+  <script type="module" src="js/app.js?v=19"></script>
 </body>
 </html>
