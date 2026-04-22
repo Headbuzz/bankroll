@@ -27,6 +27,7 @@ let gameVersion = 0;      // OCC sequence counter
 let channel = null;       // Supabase Realtime channel (broadcast + postgres_changes)
 let _reconnectTimer = null; // auto-reconnect timer handle
 let _decisionActive = false; // Decision guard: true while player is making buy/jail decision
+let _lastAnimatedKey = '';   // Dedupe: tracks last animated financial event to prevent double animation
 
 /* ── Event type constants — never use raw strings, prevents typos ──
    Keep the string VALUES identical to what is stored in the DB.
@@ -2214,18 +2215,31 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
         animateCoins('bank', ev.p, 5);
       }
     } else if (ev.type === 'BUY') {
-      // Explicitly update state.owners so syncBoardState paints correctly
-      if (ev.landed?.id !== undefined && ev.p) {
-        state.owners[ev.landed.id] = ev.p;
-        updateTileOwnerBand(ev.landed.id, ev.p);
+      // Dedupe: skip if originator (P1 animated inline) or already animated via broadcast
+      const buyKey = `BUY-${ev.p}-${ev.landed?.id}`;
+      if (ev.p === localId || buyKey === _lastAnimatedKey) {
+        // Just update state silently — no animation
+        if (ev.landed?.id !== undefined && ev.p) { state.owners[ev.landed.id] = ev.p; updateTileOwnerBand(ev.landed.id, ev.p); }
+        _lastAnimatedKey = '';
+      } else {
+        // Fallback animation (reconnection / late join)
+        _lastAnimatedKey = buyKey;
+        if (ev.landed?.id !== undefined && ev.p) { state.owners[ev.landed.id] = ev.p; updateTileOwnerBand(ev.landed.id, ev.p); }
+        await animateCoins(ev.p, 'bank', 4);
+        const buyerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+        await flashCenterEvent(`${buyerName} bought ${ev.landed.name}!`, null, `Rent: $${ev.newRent ?? ev.landed.price}`, 1500);
       }
-      await animateCoins(ev.p, 'bank', 4);
-      const buyerName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await flashCenterEvent(`\uD83C\uDFD9\uFE0F ${buyerName} bought ${ev.landed.name}!`, null, `Rent: $${ev.newRent ?? ev.landed.price}`, 1500);
     } else if (ev.type === 'RENT') {
-      await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
-      const payerName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await flashCenterEvent(`${payerName} paid $${ev.rent} rent to ${payloadState.players?.[ev.owner]?.name || 'opponent'}`, null, `-$${ev.rent}`, 1500);
+      // Dedupe: skip if originator or already animated via broadcast
+      const rentKey = `RENT-${ev.p}-${ev.landed?.id}`;
+      if (ev.p === localId || rentKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = rentKey;
+        await animateCoins(ev.p, ev.owner, Math.min(Math.ceil(ev.rent / 40), 8));
+        const payerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+        await flashCenterEvent(`${payerName} paid $${ev.rent} rent`, null, `-$${ev.rent}`, 1500);
+      }
     } else if (ev.type === 'BET_PLACED') {
       const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
       await flashCenterEvent(`${bettorName} bet on ${ev.spaceName}!`, null, '-$150', 1200);
@@ -2525,13 +2539,16 @@ async function init() {
       _markSeen(ev.id);
       const fe = ev.financialEvent;
       // Play financial animation FIRST (P2 sees coins+banner before their roll button appears)
+      // Set dedupe key so postgres_changes won't replay the same animation
       if (fe.type === 'BUY' && fe.landed) {
+        _lastAnimatedKey = `BUY-${fe.p}-${fe.landed.id}`;
         state.owners[fe.landed.id] = fe.p;
         updateTileOwnerBand(fe.landed.id, fe.p);
         await animateCoins(fe.p, 'bank', 4);
         const buyerName = fullState.players?.[fe.p]?.name || 'Opponent';
         await flashCenterEvent(`${buyerName} bought ${fe.landed.name}!`, fe.landed.image, `Rent: $${fe.newRent ?? fe.landed.price}`, 1800);
       } else if (fe.type === 'RENT' && fe.landed) {
+        _lastAnimatedKey = `RENT-${fe.p}-${fe.landed.id}`;
         await animateCoins(fe.p, fe.owner, Math.min(Math.ceil(fe.rent / 40), 8));
         const payerName = fullState.players?.[fe.p]?.name || 'Opponent';
         await flashCenterEvent(`${payerName} paid $${fe.rent} rent`, null, `-$${fe.rent}`, 1500);
