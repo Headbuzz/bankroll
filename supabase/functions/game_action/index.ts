@@ -211,6 +211,13 @@ Deno.serve(async (req: Request) => {
     }
 
     // ══════════════════════════════════════════════════════════
+    // ACTION: ping (Warm-up — no DB access, instant response)
+    // ══════════════════════════════════════════════════════════
+    if (action === 'ping') {
+      return json({ ok: true, ts: Date.now() });
+    }
+
+    // ══════════════════════════════════════════════════════════
     // ACTION: roll (Server-Authoritative Dice + Bet Resolution)
     // ══════════════════════════════════════════════════════════
     if (action === 'roll') {

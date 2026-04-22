@@ -371,6 +371,8 @@ const FACE_ROTATIONS = {
   3:'rotateX(90deg) rotateY(0deg)', 4:'rotateX(-90deg) rotateY(0deg)',
   5:'rotateX(0deg) rotateY(90deg)', 6:'rotateX(0deg) rotateY(180deg)',
 };
+
+
 function buildDiceFaces() {
   if (!die1El) return;
   die1El.innerHTML = '';
@@ -486,18 +488,26 @@ function showCenterBuyDecision(space) {
     } else { _decisionActive = false; resolve('pass'); }
   });
 }
-// flashCenterEvent: shows notification in center board.
+// flashCenterEvent: shows notification in center board for exactly 20 seconds.
+// The Promise resolves after a SHORT pacing delay (game flow continues), but the visual stays.
 // When _decisionActive is true, redirects to toast to avoid destroying buy/jail decision UI.
-function flashCenterEvent(text, imageSrc, priceText, ms = 1200) {
+let _flashDismissTimer = null;
+function flashCenterEvent(text, imageSrc, priceText, ms = 1500) {
   // DECISION GUARD: If a buy/jail decision is active, show as a toast instead
   if (_decisionActive) {
-    showToast(text + (priceText ? ` (${priceText})` : ''), ms);
-    return new Promise(r => setTimeout(r, ms));
+    showToast(text + (priceText ? ` (${priceText})` : ''), Math.min(ms, 4000));
+    return new Promise(r => setTimeout(r, Math.min(ms, 1500)));
   }
-  // Normal path: show in center board
+  // Cancel any previous 20s dismiss timer
+  if (_flashDismissTimer) { clearTimeout(_flashDismissTimer); _flashDismissTimer = null; }
   if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
+  // Show the notification
   showCenterEvent(text, imageSrc, priceText);
-  return new Promise(r => { pendingFlashTimer = setTimeout(() => { pendingFlashTimer = null; r(); }, ms); });
+  // Auto-dismiss after exactly 20 seconds (returns to idle)
+  _flashDismissTimer = setTimeout(() => { _flashDismissTimer = null; showCenterIdle(); }, 20000);
+  // Resolve Promise after short pacing delay — game flow continues, notification stays
+  const pacingDelay = Math.min(ms, 2000);
+  return new Promise(r => { pendingFlashTimer = setTimeout(() => { pendingFlashTimer = null; r(); }, pacingDelay); });
 }
 
 // ── Toast Notification System ─────────────────────────────────────────
@@ -560,8 +570,15 @@ async function handleCorner(space, playerId) {
     if (res.stakingPool !== undefined) state.stakingPool = res.stakingPool;
     renderBalances();
 
-    // Broadcast to P2 (server already persisted to DB)
-    broadcastEvent({ type: 'LUCKY', p: playerId, cardName, cardText, amount: cardResult?.amount ?? 0 });
+    // Broadcast to P2 with replay data (server already persisted to DB)
+    broadcastEvent({
+      type: 'LUCKY', p: playerId, cardName, cardText, amount: cardResult?.amount ?? 0,
+      fromPos: preMovePos,
+      teleportTo: cardResult?.teleport?.id ?? null,
+      teleportSteps: cardResult?.steps ?? null,
+      jail: cardResult?.jail ?? false,
+      passedGenesis: cardResult?.passedGenesis ?? false
+    });
 
     if (cardResult?.jail) {
       // Subpoena: animate token to jail
@@ -1108,25 +1125,31 @@ function getReachableTiers(fromPos) {
 }
 
 function showBettingPanel(bettorId) {
-  if (bettorId !== localId) return; // Only show on the actual bettor's screen
+  if (bettorId !== localId) return;
 
   const panel = document.getElementById('betting-panel');
   if (!panel) return;
   const opponent = bettorId === 'p1' ? 'p2' : 'p1';
   const bettor = state.players[bettorId];
+  const oppName = state.players[opponent].name;
 
   if (bettor.balance < 150) { panel.style.display = 'none'; return; }
-  if (state.bet.active) { panel.style.display = 'none'; return; } // already have an active bet
+  if (state.bet.active) { panel.style.display = 'none'; return; }
 
   const reachable = getReachableSpaces(state.players[opponent].position);
   const options = [...reachable].sort(() => 0.5 - Math.random()).slice(0, 2);
 
   let betsHtml = '';
   options.forEach(space => {
-    let icon = space.type === 'city' ? '\uD83C\uDFD9\uFE0F' : space.type === 'utility' ? space.icon : '\uD83C\uDFAF';
-    let colorLeft = space.type === 'city' ? TIERS[space.tier].color : '#78909C';
-    betsHtml += `<button class="bet-btn" data-bet-type="space" data-bet-value="${space.id}" style="border-left:4px solid ${colorLeft}">
-      ${icon} ${space.name} <span class="bet-btn__prob">WIN $300</span></button>`;
+    const icon = space.type === 'city' ? '\uD83C\uDFD9\uFE0F' : space.type === 'utility' ? (space.icon || '\u26A1') : '\uD83C\uDFAF';
+    const tierColor = space.type === 'city' ? TIERS[space.tier]?.color || '#78909C' : '#78909C';
+    betsHtml += `<button class="bet-btn" data-bet-type="space" data-bet-value="${space.id}">
+      <div class="bet-btn__left">
+        <span class="bet-btn__icon" style="background:${tierColor}">${icon}</span>
+        <span class="bet-btn__name">${space.name}</span>
+      </div>
+      <span class="bet-btn__reward">WIN $300</span>
+    </button>`;
   });
 
   if (bettorId === 'p1') {
@@ -1136,9 +1159,17 @@ function showBettingPanel(bettorId) {
   }
 
   panel.innerHTML = `
-    <div class="bet-panel__header">\uD83C\uDFAF PREDICT ${state.players[opponent].name.toUpperCase()}'S ROLL</div>
-    <div class="bet-panel__cost">Cost: $150 | Win: $300</div>
+    <div class="bet-panel__header">\uD83C\uDFAF PREDICTION MARKET</div>
+    <div class="bet-panel__subtitle">Predict where <strong>${oppName}</strong> will land</div>
+    <div class="bet-panel__cost-row">
+      <span class="bet-panel__cost-label">Stake</span>
+      <span class="bet-panel__cost-value">$150</span>
+      <span class="bet-panel__arrow">\u2192</span>
+      <span class="bet-panel__win-label">Win</span>
+      <span class="bet-panel__win-value">$300</span>
+    </div>
     <div class="bet-panel__options">${betsHtml}</div>
+    <div class="bet-panel__hint">Pick a tile. If ${oppName} lands there, you double up!</div>
   `;
   panel.style.display = 'block';
 
@@ -1151,10 +1182,10 @@ function showBettingPanel(bettorId) {
       state.bet = { active: true, bettor: bettorId, betType: type, betValue: value };
       renderHUD();
       const targetSpace = BOARD.find(s => String(s.id) === value);
-      panel.innerHTML = `<div class="bet-panel__header">\uD83C\uDFAF Bet placed: ${targetSpace ? targetSpace.name : value}</div><div class="bet-panel__cost">Waiting for dice roll...</div>`;
-      // Coin animation for the bettor
+      panel.innerHTML = `<div class="bet-panel__header">\uD83C\uDFAF BET PLACED</div>
+        <div class="bet-panel__subtitle">\u2705 ${targetSpace ? targetSpace.name : value}</div>
+        <div class="bet-panel__hint">Waiting for ${oppName}'s dice roll...</div>`;
       animateCoins(bettorId, 'bank', 3);
-      // Notify opponent via broadcast (fast path)
       pushSyncState({ type: 'BET_PLACED', bettor: bettorId, betType: type, betValue: value, spaceName: targetSpace ? targetSpace.name : value });
     });
   });
@@ -1275,8 +1306,9 @@ async function onRollClick() {
     _markSeen(rollEventId); // pre-mark so postgres_changes never replays our own roll
 
     // Phase 1: Start spin instantly — user sees immediate feedback
+    // Spin-until-ready: dice keeps spinning until server responds (no frozen spinner)
     startDiceSpin();
-    const spinWait = sleep(700); // minimum spin duration (runs concurrently)
+    const spinMinWait = sleep(700); // minimum spin duration (runs concurrently)
 
     // Phase 2: Ask server for dice value (crypto.getRandomValues — unhackable)
     let d1, newPos, passedGenesis, edgeFnWroteToDb = false, serverBetResult = null;
@@ -1312,7 +1344,7 @@ async function onRollClick() {
     }
 
     // Wait for minimum spin — may already be done if server took >700ms
-    await spinWait;
+    await spinMinWait;
 
     // Phase 3: Land the dice on the server's (or fallback) value
     await landDice(d1);
@@ -1677,8 +1709,10 @@ function switchTurn(finalEvent = null) {
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
   state.bet = { active: false, bettor: null, betType: null, betValue: null };
 
-  // ONE broadcast — fast path for P2 instant rendering
-  broadcastEvent(finalEvent || { type: 'END_TURN', player: state.turn === 'p1' ? 'p2' : 'p1', next: state.turn });
+  // ALWAYS broadcast END_TURN — never the financial event.
+  // The active player already showed buy/rent animation inline.
+  // Broadcasting the financial event would cause P1 to replay it (originator-skip pattern).
+  broadcastEvent({ type: 'END_TURN', player: state.turn === 'p1' ? 'p2' : 'p1', next: state.turn });
 
   // ONE server call — financial action + turn switch ATOMIC in same DB write
   if (finalEvent) {
@@ -2262,13 +2296,23 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
       const sp2 = BOARD.find(s => s.id === ev.spaceId);
       await flashCenterEvent(`\uD83C\uDFD7\uFE0F ${builderName} built on ${sp2?.name}!`, null, `\u00D7${ev.count} \uD83C\uDFE0`, 1200);
     } else if (ev.type === 'LUCKY') {
-      // Fix 1: remote player sees lucky card draw notification
+      // Replay Log pattern: animate token movement for teleport/jail on P2's screen
       const playerName = payloadState.players?.[ev.p]?.name || 'Opponent';
       const sign = ev.amount > 0 ? '+' : '';
       await flashCenterEvent(
         `\uD83C\uDCCF ${playerName} drew: ${ev.cardName}`, null,
         ev.amount !== 0 ? `${sign}$${ev.amount}` : ev.cardText, 2000
       );
+      // Animate teleport path on P2's screen (if applicable)
+      if (ev.teleportTo && ev.fromPos !== undefined && ev.teleportSteps) {
+        await animateTokenAlongPath(ev.p, ev.fromPos, ev.teleportSteps, ev.passedGenesis || false);
+      }
+      // Animate jail movement on P2's screen (if applicable)
+      if (ev.jail && ev.fromPos !== undefined) {
+        const jailId = 22;
+        const jailSteps = ((jailId - ev.fromPos) + 28) % 28 || 28;
+        await animateTokenAlongPath(ev.p, ev.fromPos, jailSteps, false);
+      }
     } else if (ev.type === 'STAKING_WIN') {
       // Fix 8: remote player sees jackpot win
       const name = payloadState.players?.[ev.p]?.name || 'Opponent';
@@ -2442,6 +2486,9 @@ async function init() {
     syncBoardState();
   }
   startTurnTimer();
+
+  // Warm-up ping: pre-warm the Edge Function to eliminate cold-start latency on first roll
+  supabase.functions.invoke('game_action', { body: { action: 'ping' } }).catch(() => {});
 
   // FIX C: Filter by primary key `id` — reliable on all Supabase plans
   // Use module-scope `channel` variable so pushSyncState can call channel.send()
