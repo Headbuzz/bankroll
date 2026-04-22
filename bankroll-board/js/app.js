@@ -1141,7 +1141,7 @@ function showBettingPanel(bettorId) {
 
   let betsHtml = '';
   options.forEach(space => {
-    const icon = space.type === 'city' ? '\uD83C\uDFD9\uFE0F' : space.type === 'utility' ? (space.icon || '\u26A1') : '\uD83C\uDFAF';
+    const icon = space.type === 'city' ? '\uD83C\uDFD9\uFE0F' : space.type === 'utility' ? (space.icon || '\u26A1') : '\uD83C\uDCCF';
     const tierColor = space.type === 'city' ? TIERS[space.tier]?.color || '#78909C' : '#78909C';
     betsHtml += `<button class="bet-btn" data-bet-type="space" data-bet-value="${space.id}">
       <div class="bet-btn__left">
@@ -1159,7 +1159,7 @@ function showBettingPanel(bettorId) {
   }
 
   panel.innerHTML = `
-    <div class="bet-panel__header">\uD83C\uDFAF PREDICTION MARKET</div>
+    <div class="bet-panel__header">PREDICTION MARKET</div>
     <div class="bet-panel__subtitle">Predict where <strong>${oppName}</strong> will land</div>
     <div class="bet-panel__cost-row">
       <span class="bet-panel__cost-label">Stake</span>
@@ -1182,7 +1182,7 @@ function showBettingPanel(bettorId) {
       state.bet = { active: true, bettor: bettorId, betType: type, betValue: value };
       renderHUD();
       const targetSpace = BOARD.find(s => String(s.id) === value);
-      panel.innerHTML = `<div class="bet-panel__header">\uD83C\uDFAF BET PLACED</div>
+      panel.innerHTML = `<div class="bet-panel__header">BET PLACED</div>
         <div class="bet-panel__subtitle">\u2705 ${targetSpace ? targetSpace.name : value}</div>
         <div class="bet-panel__hint">Waiting for ${oppName}'s dice roll...</div>`;
       animateCoins(bettorId, 'bank', 3);
@@ -1709,10 +1709,12 @@ function switchTurn(finalEvent = null) {
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
   state.bet = { active: false, bettor: null, betType: null, betValue: null };
 
-  // ALWAYS broadcast END_TURN — never the financial event.
-  // The active player already showed buy/rent animation inline.
-  // Broadcasting the financial event would cause P1 to replay it (originator-skip pattern).
-  broadcastEvent({ type: 'END_TURN', player: state.turn === 'p1' ? 'p2' : 'p1', next: state.turn });
+  // Broadcast END_TURN with embedded financial event data.
+  // P2 plays the buy/rent animation BEFORE their turn starts (instant via broadcast).
+  // P1 skips replay because sentBy === localId.
+  const endEvt = { type: 'END_TURN', player: state.turn === 'p1' ? 'p2' : 'p1', next: state.turn };
+  if (finalEvent) endEvt.financialEvent = finalEvent;
+  broadcastEvent(endEvt);
 
   // ONE server call — financial action + turn switch ATOMIC in same DB write
   if (finalEvent) {
@@ -2226,7 +2228,7 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
       await flashCenterEvent(`${payerName} paid $${ev.rent} rent to ${payloadState.players?.[ev.owner]?.name || 'opponent'}`, null, `-$${ev.rent}`, 1500);
     } else if (ev.type === 'BET_PLACED') {
       const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
-      await flashCenterEvent(`\uD83C\uDFAF ${bettorName} bet on ${ev.spaceName}!`, null, '-$150', 1200);
+      await flashCenterEvent(`${bettorName} bet on ${ev.spaceName}!`, null, '-$150', 1200);
     } else if (ev.type === 'KICK') {
       const kickedName = payloadState.players?.[ev.kicked]?.name || 'Opponent';
       await flashCenterEvent(`${kickedName} was kicked for 3x AFK!`, null, '\uD83D\uDEAB', 2500);
@@ -2517,7 +2519,30 @@ async function init() {
     }
 
     // All other events: run via playbackRender using the full broadcast state
-    // This gives instant BUY/RENT/BET/KICK feedback WITHOUT waiting for DB round-trip
+    // For END_TURN with embedded financial event, play animation BEFORE switching turn
+    if (ev?.type === 'END_TURN' && ev.financialEvent && fullState) {
+      if (_alreadySeen(ev.id)) return;
+      _markSeen(ev.id);
+      const fe = ev.financialEvent;
+      // Play financial animation FIRST (P2 sees coins+banner before their roll button appears)
+      if (fe.type === 'BUY' && fe.landed) {
+        state.owners[fe.landed.id] = fe.p;
+        updateTileOwnerBand(fe.landed.id, fe.p);
+        await animateCoins(fe.p, 'bank', 4);
+        const buyerName = fullState.players?.[fe.p]?.name || 'Opponent';
+        await flashCenterEvent(`${buyerName} bought ${fe.landed.name}!`, fe.landed.image, `Rent: $${fe.newRent ?? fe.landed.price}`, 1800);
+      } else if (fe.type === 'RENT' && fe.landed) {
+        await animateCoins(fe.p, fe.owner, Math.min(Math.ceil(fe.rent / 40), 8));
+        const payerName = fullState.players?.[fe.p]?.name || 'Opponent';
+        await flashCenterEvent(`${payerName} paid $${fe.rent} rent`, null, `-$${fe.rent}`, 1500);
+      }
+      // NOW merge state and switch turn
+      mergeServerState(fullState, true);
+      renderHUD();
+      syncBoardState();
+      return;
+    }
+
     if (fullState) {
       await playbackRender(fullState, { fromBroadcast: true });
     }
