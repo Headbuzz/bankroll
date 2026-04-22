@@ -1,8 +1,8 @@
 /* ══════════════════════════════════════════════
-   BANKROLL — Board Engine v7 (Tier 3 Server-Authoritative)
+   BANKROLL — Board Engine v8 (Atomic Turn Model)
    Features: Monopoly, Buildings, Scaled Rent, Trade, Prediction Market
    Win: $2,500 NW | Bankrupt: -$500
-   Security: All financial mutations route through validated Edge Function actions
+   Security: All financial mutations validated + turn-switched atomically in single DB write
    ============================================== */
 
 'use strict';
@@ -26,6 +26,7 @@ let gameId = null;        // UUID primary key for Realtime filter
 let gameVersion = 0;      // OCC sequence counter
 let channel = null;       // Supabase Realtime channel (broadcast + postgres_changes)
 let _reconnectTimer = null; // auto-reconnect timer handle
+let _decisionActive = false; // Decision guard: true while player is making buy/jail decision
 
 /* ── Event type constants — never use raw strings, prevents typos ──
    Keep the string VALUES identical to what is stored in the DB.
@@ -451,6 +452,7 @@ function showCenterEvent(text, imageSrc, priceText) {
 let pendingFlashTimer = null;
 
 function showCenterDecision(text, imageSrc, buttons) {
+  _decisionActive = true; // GUARD: protect this UI from incoming broadcasts
   return new Promise(resolve => {
     // Cancel any pending flash so it doesn't wipe the decision prompt
     if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
@@ -459,13 +461,14 @@ function showCenterDecision(text, imageSrc, buttons) {
       eventActions.style.display = 'flex';
       eventActions.innerHTML = buttons.map(b => `<button class="btn ${b.cls}" id="${b.id}">${b.label}</button>`).join('');
       let resolved = false;
-      const unbind = () => { if (resolved) return; resolved = true; eventActions.style.display = 'none'; window.resolveActiveDecision = null; };
+      const unbind = () => { if (resolved) return; resolved = true; _decisionActive = false; eventActions.style.display = 'none'; window.resolveActiveDecision = null; };
       window.resolveActiveDecision = () => { unbind(); resolve(buttons[buttons.length - 1].value); };
       buttons.forEach(b => { document.getElementById(b.id)?.addEventListener('click', () => { unbind(); resolve(b.value); }); });
-    } else resolve(buttons[0]?.value);
+    } else { _decisionActive = false; resolve(buttons[0]?.value); }
   });
 }
 function showCenterBuyDecision(space) {
+  _decisionActive = true; // GUARD: protect this UI from incoming broadcasts
   return new Promise(resolve => {
     // Fix 3: ensure any open property overlay is hidden so it doesn't ghost behind this prompt
     if (overlayEl?.classList.contains('overlay--active')) hidePropertyCard();
@@ -476,62 +479,113 @@ function showCenterBuyDecision(space) {
       eventActions.style.display = 'flex';
       eventActions.innerHTML = `<button class="btn btn--buy-center" id="center-buy">BUY — $${space.price}</button><button class="btn btn--pass-center" id="center-pass">PASS</button>`;
       let resolved = false;
-      const unbind = () => { if (resolved) return; resolved = true; eventActions.style.display = 'none'; window.resolveActiveDecision = null; };
+      const unbind = () => { if (resolved) return; resolved = true; _decisionActive = false; eventActions.style.display = 'none'; window.resolveActiveDecision = null; };
       window.resolveActiveDecision = () => { unbind(); resolve('pass'); };
       document.getElementById('center-buy').addEventListener('click', () => { unbind(); resolve('buy'); });
       document.getElementById('center-pass').addEventListener('click', () => { unbind(); resolve('pass'); });
-    } else resolve('pass');
+    } else { _decisionActive = false; resolve('pass'); }
   });
 }
-// flashCenterEvent: shows notification and keeps it on screen (persistent).
-// The `ms` param is used ONLY for sequencing/pacing (caller waits before continuing),
-// NOT for auto-dismiss. The notification stays until the next event or roll start.
+// flashCenterEvent: shows notification in center board.
+// When _decisionActive is true, redirects to toast to avoid destroying buy/jail decision UI.
 function flashCenterEvent(text, imageSrc, priceText, ms = 1200) {
-  // Cancel any pending flash state (no-op since we no longer auto-dismiss)
+  // DECISION GUARD: If a buy/jail decision is active, show as a toast instead
+  if (_decisionActive) {
+    showToast(text + (priceText ? ` (${priceText})` : ''), ms);
+    return new Promise(r => setTimeout(r, ms));
+  }
+  // Normal path: show in center board
   if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
   showCenterEvent(text, imageSrc, priceText);
-  // Wait `ms` for pacing (callers chain events sequentially) but DON'T dismiss
   return new Promise(r => { pendingFlashTimer = setTimeout(() => { pendingFlashTimer = null; r(); }, ms); });
+}
+
+// ── Toast Notification System ─────────────────────────────────────────
+// Non-blocking notifications that stack vertically. Used when the center
+// board is occupied by a buy/jail decision (decision guard active).
+function showToast(message, duration = 2500) {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.style.cssText = 'position:fixed;top:16px;right:16px;z-index:10000;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement('div');
+  toast.className = 'game-toast';
+  toast.style.cssText = 'background:rgba(20,20,30,0.92);color:#fff;padding:10px 18px;border-radius:10px;font-size:0.85rem;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,0.4);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.12);opacity:0;transform:translateX(30px);transition:opacity 0.3s, transform 0.3s;max-width:320px;pointer-events:auto;';
+  toast.textContent = message;
+  container.appendChild(toast);
+  // Animate in
+  requestAnimationFrame(() => {
+    toast.style.opacity = '1';
+    toast.style.transform = 'translateX(0)';
+  });
+  // Auto-dismiss
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(30px)';
+    setTimeout(() => toast.remove(), 350);
+  }, duration);
 }
 
 
 /* ══════════════════════════════════════════════
    CORNER HANDLERS
    ============================================== */
+// handleCorner: v8 Server-First — Lucky/Staking are server-authoritative.
+// Returns a finalEvent if the corner generates a buy/rent that switchTurn should handle atomically.
 async function handleCorner(space, playerId) {
   const player = state.players[playerId];
 
   if (space.subtype === 'lucky') {
-    // Capture position BEFORE execute() — Subpoena changes player.position inside execute
+    // SERVER-FIRST: Server draws the card using crypto.getRandomValues — unhackable
     const preMovePos = player.position;
-    const card = drawLuckyCard();
-    const result = card.execute(playerId, state);
-    const displayText = result.text || card.text;
-    renderBalances(); // lucky card changed balances — no button state change
+    const res = await serverAction('lucky', { end_turn: false });
+    if (!res?.ok) {
+      console.warn('[handleCorner:lucky] server failed, skipping');
+      return null;
+    }
+    const { cardName, cardText, cardResult } = res;
 
-    if (result.jail) {
-      // Animate token crawling to jail (position 22) instead of teleporting silently.
-      // execute() already set player.position = 22 and jailTurns = 2.
-      await flashCenterEvent(`${card.name}: ${displayText}`, 'luckycard.png', null, 1500);
+    // Apply server-determined state changes locally for immediate rendering
+    if (res.players) {
+      state.players.p1.balance = res.players.p1.balance;
+      state.players.p2.balance = res.players.p2.balance;
+      if (res.players.p1.jailTurns !== undefined) state.players.p1.jailTurns = res.players.p1.jailTurns;
+      if (res.players.p2.jailTurns !== undefined) state.players.p2.jailTurns = res.players.p2.jailTurns;
+      if (res.players.p1.position !== undefined) state.players.p1.position = res.players.p1.position;
+      if (res.players.p2.position !== undefined) state.players.p2.position = res.players.p2.position;
+    }
+    if (res.stakingPool !== undefined) state.stakingPool = res.stakingPool;
+    renderBalances();
+
+    // Broadcast to P2 (server already persisted to DB)
+    broadcastEvent({ type: 'LUCKY', p: playerId, cardName, cardText, amount: cardResult?.amount ?? 0 });
+
+    if (cardResult?.jail) {
+      // Subpoena: animate token to jail
+      await flashCenterEvent(`${cardName}: ${cardText}`, 'luckycard.png', null, 1500);
       const jailId = 22;
       const jailSteps = ((jailId - preMovePos) + 28) % 28 || 28;
       await animateTokenAlongPath(playerId, preMovePos, jailSteps, false);
-      renderBalances(); // position set, jail badge will show on next full renderHUD at turn switch
+      renderBalances();
       await flashCenterEvent(`${player.name} is sent to Jail!`, 'jail.png', '\uD83D\uDD12 2 Turns', 1500);
 
-    } else if (result.teleport) {
-      // Ecosystem Migration: animate player to the randomly assigned utility
-      const target = result.teleport;
-      await flashCenterEvent(`${card.name}: ${displayText}`, 'luckycard.png', null, 1800);
-      const steps = ((target.id - preMovePos) + 28) % 28 || 28;
-      const passedGenesis = (preMovePos + steps) > 28;
+    } else if (cardResult?.teleport) {
+      // Ecosystem Migration: animate player to target utility, then handle buy/rent
+      const target = cardResult.teleport;
+      await flashCenterEvent(`${cardName}: ${cardText}`, 'luckycard.png', null, 1800);
+      const steps = cardResult.steps || (((target.id - preMovePos) + 28) % 28 || 28);
+      const passedGenesis = cardResult.passedGenesis || false;
       await animateTokenAlongPath(playerId, preMovePos, steps, passedGenesis);
-      // FIX: update position after teleport so next roll starts from correct tile
       player.position = target.id;
       if (passedGenesis) { player.balance += 200; renderBalances(); }
+
+      // Handle buy/rent at teleport destination — return as finalEvent for atomic switchTurn
       if (!state.owners[target.id]) {
         if (player.balance >= target.price) {
-          resumeTurnTimer(); // only run timer during the buy decision
+          resumeTurnTimer();
           const decision = await showCenterBuyDecision(target);
           stopTurnTimer();
           if (decision === 'buy') {
@@ -539,11 +593,12 @@ async function handleCorner(space, playerId) {
             state.stakingPool += Math.round(target.price * 0.3);
             state.owners[target.id] = playerId;
             updateTileOwnerBand(target.id, playerId);
-            renderBalances(); // BUY deduction — no button state change before coins animate
+            renderBalances();
             await animateCoins(playerId, 'bank', 3);
             const newRent = calculateRent(target);
             await flashCenterEvent(`${player.name} bought ${target.name}!`, null, `Rent: $${newRent}`, 1500);
-            pushSyncState({ type: 'BUY', p: playerId, landed: target, newRent });
+            // Return event for atomic switchTurn (buy + end_turn in one call)
+            return { type: 'BUY', p: playerId, landed: target, spaceId: target.id, newRent };
           } else { showCenterIdle(); }
         } else {
           await flashCenterEvent(`${player.name} can't afford ${target.name}!`, null, null, 1200);
@@ -553,21 +608,23 @@ async function handleCorner(space, playerId) {
         const owner = state.owners[target.id];
         player.balance -= rent;
         state.players[owner].balance += rent;
-        renderBalances(); // rent paid — both balances update, no button change
+        renderBalances();
         await animateCoins(playerId, owner, 3);
         await flashCenterEvent(`${player.name} paid $${rent} rent!`, null, `-$${rent}`, 1500);
-        pushSyncState({ type: 'RENT', p: playerId, owner, rent, landed: target });
+        // Return event for atomic switchTurn (rent + end_turn in one call)
+        return { type: 'RENT', p: playerId, owner, rent, landed: target, spaceId: target.id };
       } else { showCenterIdle(); }
 
     } else {
-      await flashCenterEvent(card.name + ': ' + displayText, 'luckycard.png', result.amount !== 0 ? `${result.amount > 0 ? '+' : ''}$${result.amount}` : null, 2500);
-      if (result.amount > 0) await animateCoins(result.from, result.to, Math.min(Math.ceil(Math.abs(result.amount) / 50), 8));
-      else if (result.amount < 0) await animateCoins(result.from, result.to, Math.min(Math.ceil(Math.abs(result.amount) / 50), 6));
+      // Normal card (no teleport, no jail) — just show animation
+      await flashCenterEvent(cardName + ': ' + cardText, 'luckycard.png',
+        (cardResult?.amount ?? 0) !== 0 ? `${cardResult.amount > 0 ? '+' : ''}$${cardResult.amount}` : null, 2500);
+      if (cardResult?.amount > 0) await animateCoins(cardResult.from || 'bank', cardResult.to || playerId, Math.min(Math.ceil(Math.abs(cardResult.amount) / 50), 8));
+      else if (cardResult?.amount < 0) await animateCoins(cardResult.from || playerId, cardResult.to || 'bank', Math.min(Math.ceil(Math.abs(cardResult.amount) / 50), 6));
     }
-    // Broadcast lucky card draw so P2 sees notification
-    pushSyncState({ type: 'LUCKY', p: playerId, cardName: card.name, cardText: displayText, amount: result.amount ?? 0 });
     checkBankruptcy(playerId);
     checkWin();
+    return null; // no finalEvent for non-teleport lucky cards
   }
 
   else if (space.subtype === 'staking') {
@@ -575,29 +632,38 @@ async function handleCorner(space, playerId) {
     if (pool <= 0) {
       await flashCenterEvent('Staking Pool is empty!', 'centralpool.png', '$0', 1500);
     } else {
-      const pct = pool < 50 ? 1.0 : (0.35 + Math.random() * 0.30);
-      const payout = Math.floor(pool * pct);
-      const pctDisplay = Math.round(pct * 100);
-      player.balance += payout;
-      state.stakingPool -= payout;
-      renderBalances(); // staking pool payout — balance and pool display only
-      await flashCenterEvent(`${player.name} won ${pctDisplay}% of the Staking Pool!`, 'centralpool.png', `+$${payout}`, 2500);
+      // SERVER-FIRST: Server determines payout percentage — unhackable
+      const res = await serverAction('staking_collect', { end_turn: false });
+      if (!res?.ok) {
+        console.warn('[handleCorner:staking] server failed, skipping');
+        return null;
+      }
+      const { payout, pct, newBalance, newPool } = res;
+      player.balance = newBalance;
+      state.stakingPool = newPool;
+      renderBalances();
+      await flashCenterEvent(`${player.name} won ${pct}% of the Staking Pool!`, 'centralpool.png', `+$${payout}`, 2500);
       await animateCoins('bank', playerId, Math.min(Math.ceil(payout / 50), 10));
-      // Fix 8: broadcast STAKING_WIN so P2 sees the jackpot
-      pushSyncState({ type: 'STAKING_WIN', p: playerId, payout, pct: pctDisplay });
+      // Broadcast to P2 (server already persisted)
+      broadcastEvent({ type: 'STAKING_WIN', p: playerId, payout, pct });
       checkWin();
     }
+    return null; // staking doesn't generate a buy/rent finalEvent
   }
 
   else if (space.subtype === 'jail') {
-    // Fix 6: Landing on jail sets jailTurns only — the pay/serve decision
-    // happens at the START of the jailed player's NEXT turn in onRollClick
+    // Landing on jail sets jailTurns — decision happens at NEXT turn
     player.jailTurns = 2;
+    player.position = 22;
     renderHUD();
     await flashCenterEvent(`${player.name} is going to Jail!`, 'jail.png', '\uD83D\uDD12 2 Turns', 1800);
-    pushSyncState({ type: 'JAIL_SENT', p: playerId });
+    // Broadcast to P2 (jail_sent is not a financial action, just state sync)
+    broadcastEvent({ type: 'JAIL_SENT', p: playerId });
     checkBankruptcy(playerId);
+    return null;
   }
+
+  return null; // genesis/other corners — no event
 }
 
 
@@ -1157,9 +1223,8 @@ async function onRollClick() {
     if (player.jailTurns > 0) {
       if (player.jailTurns === 2) {
         // FIRST jail turn: show the pay-or-serve decision exactly once.
-        // jailTurns=2 means player arrived in jail on their previous turn.
-        broadcastEvent({ type: 'JAIL_TURN', p: ap, turnsLeft: 2 }); // notify P2 (no DB write yet)
-        resumeTurnTimer(); // allow AFK auto-resolve
+        broadcastEvent({ type: 'JAIL_TURN', p: ap, turnsLeft: 2 });
+        resumeTurnTimer();
         const decision = await showCenterDecision(
           '\uD83D\uDD12 You are in Jail! Pay $150 to escape now, or serve (next turn auto-skipped).',
           'jail.png',
@@ -1170,17 +1235,18 @@ async function onRollClick() {
         );
         stopTurnTimer();
         if (decision === 'pay' && player.balance >= 150) {
+          // ATOMIC: jail_pay + end_turn in ONE server call
           player.balance -= 150;
           state.stakingPool += Math.round(150 * 0.3);
           player.jailTurns = 0;
           renderHUD();
           await animateCoins(ap, 'bank', 3);
           await flashCenterEvent(`${player.name} paid $150 and is free!`, 'jail.png', '-$150', 1500);
-          pushSyncState({ type: 'JAIL_EXIT', p: ap });
+          serverAction('jail_pay', { end_turn: true }).catch(() => {}); // ATOMIC: jail_pay + end_turn
         } else {
           // Chose to serve or couldn't afford — next turn auto-skipped, no decision shown
           player.jailTurns = 1;
-          serverAction('jail_serve'); // persist jailTurns 2→1 server-side
+          serverAction('jail_serve', { end_turn: true }).catch(() => {}); // ATOMIC: jail_serve + end_turn
           broadcastEvent({ type: 'JAIL_SERVE', p: ap, turnsLeft: 1 });
           await flashCenterEvent(
             `${player.name} chose to serve. Next turn will be auto-skipped.`,
@@ -1190,14 +1256,14 @@ async function onRollClick() {
       } else {
         // jailTurns === 1: MANDATORY AUTO-SKIP — no prompt, just notify and move on
         player.jailTurns = 0;
-        serverAction('jail_serve'); // persist jailTurns 1→0 server-side
+        serverAction('jail_serve', { end_turn: true }).catch(() => {}); // ATOMIC: jail_serve + end_turn
         broadcastEvent({ type: 'JAIL_TURN', p: ap, turnsLeft: 0 });
         await flashCenterEvent(
           `${player.name}'s jail sentence served \u2014 turn auto-skipped!`,
           'jail.png', '\uD83D\uDD13 Released', 1800
         );
       }
-      switchTurn(null);
+      switchTurnLocal(); // server already switched turn atomically
       return; // finally fires → state.rolling = false
     }
 
@@ -1213,7 +1279,7 @@ async function onRollClick() {
     const spinWait = sleep(700); // minimum spin duration (runs concurrently)
 
     // Phase 2: Ask server for dice value (crypto.getRandomValues — unhackable)
-    let d1, newPos, passedGenesis, edgeFnWroteToDb = false;
+    let d1, newPos, passedGenesis, edgeFnWroteToDb = false, serverBetResult = null;
     try {
       const rollRes = await supabase.functions.invoke('game_action', {
         body: { action: 'roll', room_code: roomCode, event_id: rollEventId }
@@ -1222,8 +1288,18 @@ async function onRollClick() {
       d1            = rollRes.data.dice;
       newPos        = rollRes.data.newPos;
       passedGenesis = rollRes.data.passedGenesis;
+      serverBetResult = rollRes.data.betResult;
       player.position = newPos;
       if (passedGenesis) player.balance += 200;
+      // Update bet state from server BEFORE any broadcast (fixes stale bet state in broadcast)
+      if (serverBetResult) {
+        if (serverBetResult.won) {
+          state.players[serverBetResult.bettor].balance += 300;
+        } else {
+          state.stakingPool += serverBetResult.poolShare || 0;
+        }
+        state.bet = { active: false, bettor: null, betType: null, betValue: null };
+      }
       edgeFnWroteToDb = true;
     } catch (_rollErr) {
       // Graceful fallback: local dice only if Edge Fn is unreachable (dev/offline)
@@ -1261,7 +1337,10 @@ async function onRollClick() {
     /* ── CORNER ──────────────────────────────────────────────────── */
     // NOTE: no resumeTurnTimer here — corner animations are automatic (no player decision).
     // handleCorner itself calls resumeTurnTimer/stopTurnTimer only when a buy decision is shown.
-    if (landed?.type === 'corner') { await handleCorner(landed, ap); }
+    if (landed?.type === 'corner') {
+      const cornerEvent = await handleCorner(landed, ap);
+      if (cornerEvent) finalEvent = cornerEvent;
+    }
 
     /* ── PROPERTY ────────────────────────────────────────────────── */
     if (landed && (landed.type === 'city' || landed.type === 'utility')) {
@@ -1305,8 +1384,18 @@ async function onRollClick() {
       } else { showCenterIdle(); }
     }
 
-    // Resolve bet AFTER buy/rent so bet notification doesn't overwrite purchase/rent
-    await resolveBet(d1, landed);
+    // Resolve bet using SERVER result (no client-side resolveBet — prevents double-counting)
+    if (serverBetResult) {
+      const bettor = state.players[serverBetResult.bettor];
+      if (serverBetResult.won) {
+        renderHUD();
+        await flashCenterEvent(`${bettor.name} won the prediction bet!`, null, `+$300`, 1500);
+        await animateCoins('bank', serverBetResult.bettor, 6);
+      } else {
+        renderHUD();
+        await flashCenterEvent(`${bettor.name} lost the bet. $${serverBetResult.poolShare} \u2192 Pool`, null, '-$150', 1200);
+      }
+    }
 
     // Stop landing countdown before switchTurn so it doesn't overlap next turn's timer
     stopTurnTimer();
@@ -1581,20 +1670,49 @@ function renderPlayerCard(elId, player, playerId) {
 /* ══════════════════════════════════════════════
    TURN SWITCHING
    ============================================== */
-// switchTurn: Tier 3 — routes financial event + end_turn through validated server actions
+// switchTurn: v8 Atomic — ONE server call (financial + end_turn in same DB write) + ONE broadcast.
+// No more separate _serverPersist + serverAction('end_turn') race condition.
 function switchTurn(finalEvent = null) {
   if (state.gameOver) return;
   state.turn = state.turn === 'p1' ? 'p2' : 'p1';
   state.bet = { active: false, bettor: null, betType: null, betValue: null };
-  // Persist financial event if present (routes to buy/rent/etc via validated action)
+
+  // ONE broadcast — fast path for P2 instant rendering
+  broadcastEvent(finalEvent || { type: 'END_TURN', player: state.turn === 'p1' ? 'p2' : 'p1', next: state.turn });
+
+  // ONE server call — financial action + turn switch ATOMIC in same DB write
   if (finalEvent) {
-    pushSyncState(finalEvent, true); // broadcast only — _serverPersist handles DB
-    _serverPersist(Object.assign({ id: crypto.randomUUID(), p: localId }, finalEvent));
+    const actionMap = {
+      'BUY':  () => serverAction('buy',  { space_id: finalEvent.landed?.id || finalEvent.spaceId, end_turn: true }),
+      'RENT': () => serverAction('rent', { space_id: finalEvent.landed?.id || finalEvent.spaceId, end_turn: true }),
+    };
+    const fn = actionMap[finalEvent.type];
+    if (fn) {
+      fn().catch(err => { console.error('[switchTurn] atomic action failed:', err); });
+    } else {
+      // Non-financial event — just switch turn
+      serverAction('end_turn').catch(() => {});
+    }
+  } else {
+    // No financial event — pure turn switch
+    serverAction('end_turn').catch(() => {});
   }
-  // Persist turn switch via validated end_turn (fire-and-forget, OCC-safe)
-  serverAction('end_turn').catch(() => {});
-  // Broadcast full state with switched turn for instant P2 rendering
+
+  _switchTurnUI();
+}
+
+// switchTurnLocal: Used AFTER a server-first action that already persisted (e.g., jail_pay with end_turn:true).
+// Only flips local state + broadcasts. NO server call (server already did it).
+function switchTurnLocal() {
+  if (state.gameOver) return;
+  state.turn = state.turn === 'p1' ? 'p2' : 'p1';
+  state.bet = { active: false, bettor: null, betType: null, betValue: null };
   broadcastEvent({ type: 'END_TURN', player: state.turn === 'p1' ? 'p2' : 'p1', next: state.turn });
+  _switchTurnUI();
+}
+
+// Shared UI logic for turn switch — extracted to avoid duplication
+function _switchTurnUI() {
   startTurnTimer();
   renderHUD();
   hideBettingPanel();
@@ -1937,9 +2055,11 @@ function pushSyncState(eventPayload = null, skipDbWrite = false) {
   }
 }
 
-// ── Tier 3: Route events to validated Edge Function actions ──────────────
-// Financial actions go through server-validated endpoints with OCC atomicity.
-// Non-financial events fall back to state_sync for backward compatibility.
+// ── v8: Routing table — only mid-turn actions remain here ──────────────
+// BUY/RENT: now handled atomically by switchTurn (serverAction with end_turn:true)
+// LUCKY/STAKING: now server-first in handleCorner
+// JAIL: now atomic in onRollClick
+// Only BUILD, SELL, BET, TRADE remain as independent mid-turn actions
 function _serverPersist(ev) {
   function call(action, extra = {}) {
     return supabase.functions.invoke('game_action', {
@@ -1954,6 +2074,8 @@ function _serverPersist(ev) {
     }).catch(e => { console.error(`[server:${action}]`, e); });
   }
   function _refetchState() {
+    // Decision guard: don't overwrite state while player is making a buy/jail decision
+    if (_decisionActive) return;
     supabase.from('games').select('state, version').eq('room_code', roomCode).single().then(({ data }) => {
       if (data) { gameVersion = data.version; playbackRender(data.state); }
     });
@@ -1965,21 +2087,23 @@ function _serverPersist(ev) {
   if (!ev) { _syncFallback(); return; }
 
   switch (ev.type) {
-    case 'ROLL':      break; // Already persisted by Edge Function (skipDbWrite=true at callsite)
-    case 'BUY':       call('buy', { space_id: ev.landed?.id || ev.spaceId }); break;
-    case 'RENT':      call('rent', { space_id: ev.landed?.id || ev.spaceId }); break;
+    case 'ROLL':      break; // Already persisted by Edge Function
+    case 'BUY':       break; // Now atomic in switchTurn
+    case 'RENT':      break; // Now atomic in switchTurn
     case 'BUILD':     call('build', { space_id: ev.spaceId }); break;
     case 'SELL':      call('sell', { space_id: ev.spaceId }); break;
-    case 'JAIL_EXIT': call('jail_pay'); break;
-    case 'JAIL_TURN': call('jail_serve'); break;
     case 'BET_PLACED': call('bet', { bet_type: ev.betType || 'space', bet_value: ev.betValue }); break;
     case 'TRADE_EXECUTED':
       call('trade_execute', {
         proposer: ev.proposer, offerProps: ev.offerProps, counterProps: ev.counterProps,
         offerCash: ev.offerCash, counterCash: ev.counterCash
       }); break;
-    case 'END_TURN':  call('end_turn'); break;
-    // Non-deterministic or non-financial: fallback to state_sync (v2 will make these server-first)
+    case 'END_TURN':  break; // Now atomic in switchTurn
+    case 'JAIL_EXIT': break; // Now atomic (jail_pay + end_turn)
+    case 'JAIL_TURN': break; // Now atomic (jail_serve + end_turn)
+    case 'LUCKY':     break; // Now server-first in handleCorner
+    case 'STAKING_WIN': break; // Now server-first in handleCorner
+    case 'JAIL_SENT': break; // Broadcast-only, server persists via lucky card
     default:          _syncFallback(); break;
   }
 }

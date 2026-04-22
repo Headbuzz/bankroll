@@ -95,6 +95,12 @@ const BOARD_SIZE = 28;
 function getTierCities(tier: number) { return BOARD_DATA.filter(s => s.type === 'city' && s.tier === tier); }
 function hasMonopoly(owners: any, pid: string, tier: number) { return getTierCities(tier).every(s => owners[s.id] === pid); }
 function countOwnedUtils(owners: any, pid: string) { return BOARD_DATA.filter(s => s.type === 'utility' && owners[s.id] === pid).length; }
+
+// Atomic turn switch helper — call INSIDE mutator to include turn switch in the same DB write
+function applyEndTurn(ns: any, currentSlot: string) {
+  ns.turn = currentSlot === 'p1' ? 'p2' : 'p1';
+  ns.phase = 'idle';
+}
 function calcRent(space: any, owners: any, buildings: any): number {
   if (space.type === 'utility') { const o = owners[space.id]; if (!o) return 0; return UTIL_RENT[countOwnedUtils(owners, o)] || 20; }
   if (space.type !== 'city') return 0;
@@ -253,9 +259,10 @@ Deno.serve(async (req: Request) => {
 
     // ══════════════════════════════════════════════════════════
     // ACTION: buy (Server-Authoritative Purchase)
+    // Supports end_turn: true for atomic buy + turn switch
     // ══════════════════════════════════════════════════════════
     if (action === 'buy') {
-      const { space_id } = body;
+      const { space_id, end_turn: shouldEndTurn } = body;
       const result = await atomicAction((state) => {
         if (state.turn !== mySlot) throw new Error('Not your turn');
         const space = BOARD_DATA.find((s: any) => s.id === space_id);
@@ -269,17 +276,19 @@ Deno.serve(async (req: Request) => {
         ns.owners[String(space_id)] = mySlot;
         ns.sentBy = mySlot;
         const rent = calcRent(space, ns.owners, ns.buildings);
-        ns.last_event = { type: 'BUY', id: crypto.randomUUID(), p: mySlot, spaceId: space_id, spaceName: space.name, newRent: rent };
-        return { newState: ns, result: { ok: true, newBalance: ns.players[mySlot].balance, rent, stakingPool: ns.stakingPool, owners: ns.owners } };
+        ns.last_event = { type: 'BUY', id: crypto.randomUUID(), p: mySlot, spaceId: space_id, spaceName: space.name, newRent: rent, landed: { id: space_id, name: space.name, price: space.price } };
+        if (shouldEndTurn) applyEndTurn(ns, mySlot);
+        return { newState: ns, result: { ok: true, newBalance: ns.players[mySlot].balance, rent, stakingPool: ns.stakingPool, owners: ns.owners, turnSwitched: !!shouldEndTurn } };
       });
       return json(result);
     }
 
     // ══════════════════════════════════════════════════════════
     // ACTION: rent (Server-Authoritative Rent Collection)
+    // Supports end_turn: true for atomic rent + turn switch
     // ══════════════════════════════════════════════════════════
     if (action === 'rent') {
-      const { space_id } = body;
+      const { space_id, end_turn: shouldEndTurn } = body;
       const result = await atomicAction((state) => {
         if (state.turn !== mySlot) throw new Error('Not your turn');
         const space = BOARD_DATA.find((s: any) => s.id === space_id);
@@ -293,7 +302,8 @@ Deno.serve(async (req: Request) => {
         ns.players[owner].balance += rent;
         ns.sentBy = mySlot;
         ns.last_event = { type: 'RENT', id: crypto.randomUUID(), p: mySlot, owner, rent, spaceId: space_id, spaceName: space.name };
-        return { newState: ns, result: { ok: true, rent, payerBalance: ns.players[mySlot].balance, ownerBalance: ns.players[owner].balance } };
+        if (shouldEndTurn) applyEndTurn(ns, mySlot);
+        return { newState: ns, result: { ok: true, rent, payerBalance: ns.players[mySlot].balance, ownerBalance: ns.players[owner].balance, turnSwitched: !!shouldEndTurn } };
       });
       return json(result);
     }
@@ -354,6 +364,7 @@ Deno.serve(async (req: Request) => {
     // ACTION: lucky (Server-Authoritative Lucky Card Draw)
     // ══════════════════════════════════════════════════════════
     if (action === 'lucky') {
+      const { end_turn: shouldEndTurn } = body;
       const result = await atomicAction((state) => {
         if (state.turn !== mySlot) throw new Error('Not your turn');
         const pos = state.players[mySlot].position;
@@ -417,15 +428,19 @@ Deno.serve(async (req: Request) => {
 
         ns.sentBy = mySlot;
         ns.last_event = { type: 'LUCKY', id: crypto.randomUUID(), p: mySlot, cardName: card.name, cardText: cardResult.text || card.name, amount: cardResult.amount, cardResult };
-        return { newState: ns, result: { ok: true, cardName: card.name, cardText: cardResult.text, cardResult, players: ns.players, stakingPool: ns.stakingPool } };
+        // End turn atomically for non-teleport cards. Teleport cards need client to handle buy/rent first.
+        if (shouldEndTurn && !cardResult.teleport) applyEndTurn(ns, mySlot);
+        return { newState: ns, result: { ok: true, cardName: card.name, cardText: cardResult.text, cardResult, players: ns.players, stakingPool: ns.stakingPool, turnSwitched: !!(shouldEndTurn && !cardResult.teleport) } };
       });
       return json(result);
     }
 
     // ══════════════════════════════════════════════════════════
     // ACTION: staking_collect (Server-Authoritative Pool Payout)
+    // Supports end_turn: true for atomic payout + turn switch
     // ══════════════════════════════════════════════════════════
     if (action === 'staking_collect') {
+      const { end_turn: shouldEndTurn } = body;
       const result = await atomicAction((state) => {
         if (state.turn !== mySlot) throw new Error('Not your turn');
         const pos = state.players[mySlot].position;
@@ -443,15 +458,18 @@ Deno.serve(async (req: Request) => {
         ns.sentBy = mySlot;
         const pctDisplay = Math.round(pct * 100);
         ns.last_event = { type: 'STAKING_WIN', id: crypto.randomUUID(), p: mySlot, payout, pct: pctDisplay };
-        return { newState: ns, result: { ok: true, payout, pct: pctDisplay, newBalance: ns.players[mySlot].balance, newPool: ns.stakingPool } };
+        if (shouldEndTurn) applyEndTurn(ns, mySlot);
+        return { newState: ns, result: { ok: true, payout, pct: pctDisplay, newBalance: ns.players[mySlot].balance, newPool: ns.stakingPool, turnSwitched: !!shouldEndTurn } };
       });
       return json(result);
     }
 
     // ══════════════════════════════════════════════════════════
     // ACTION: jail_pay (Server-Authoritative Jail Escape)
+    // Supports end_turn: true for atomic jail_pay + turn switch
     // ══════════════════════════════════════════════════════════
     if (action === 'jail_pay') {
+      const { end_turn: shouldEndTurn } = body;
       const result = await atomicAction((state) => {
         if (state.turn !== mySlot) throw new Error('Not your turn');
         if (state.players[mySlot].jailTurns <= 0) throw new Error('Not in jail');
@@ -463,15 +481,18 @@ Deno.serve(async (req: Request) => {
         ns.players[mySlot].jailTurns = 0;
         ns.sentBy = mySlot;
         ns.last_event = { type: 'JAIL_EXIT', id: crypto.randomUUID(), p: mySlot };
-        return { newState: ns, result: { ok: true, newBalance: ns.players[mySlot].balance, stakingPool: ns.stakingPool } };
+        if (shouldEndTurn) applyEndTurn(ns, mySlot);
+        return { newState: ns, result: { ok: true, newBalance: ns.players[mySlot].balance, stakingPool: ns.stakingPool, turnSwitched: !!shouldEndTurn } };
       });
       return json(result);
     }
 
     // ══════════════════════════════════════════════════════════
     // ACTION: jail_serve (Server-Authoritative Jail Serve)
+    // Supports end_turn: true for atomic jail_serve + turn switch
     // ══════════════════════════════════════════════════════════
     if (action === 'jail_serve') {
+      const { end_turn: shouldEndTurn } = body;
       const result = await atomicAction((state) => {
         if (state.turn !== mySlot) throw new Error('Not your turn');
         if (state.players[mySlot].jailTurns <= 0) throw new Error('Not in jail');
@@ -480,7 +501,8 @@ Deno.serve(async (req: Request) => {
         ns.players[mySlot].jailTurns -= 1;
         ns.sentBy = mySlot;
         ns.last_event = { type: 'JAIL_TURN', id: crypto.randomUUID(), p: mySlot, turnsLeft: ns.players[mySlot].jailTurns };
-        return { newState: ns, result: { ok: true, jailTurns: ns.players[mySlot].jailTurns } };
+        if (shouldEndTurn) applyEndTurn(ns, mySlot);
+        return { newState: ns, result: { ok: true, jailTurns: ns.players[mySlot].jailTurns, turnSwitched: !!shouldEndTurn } };
       });
       return json(result);
     }
