@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
-  <link href="css/styles.css?v=16" rel="stylesheet"/>
+  <link href="css/styles.css?v=17" rel="stylesheet"/>
 </head>
 <body>
   <!-- Auth Guard: Ensure player belongs in a room -->
@@ -44,6 +44,11 @@
   <!-- ═══ Player Cards ═══ -->
   <div id="player1-hud" class="hud-player hud-player--left"></div>
   <div id="player2-hud" class="hud-player hud-player--right"></div>
+
+  <!-- ═══ Net Worth Race Strip ═══ -->
+  <div id="race-strip" class="race-strip">
+    <canvas id="race-canvas"></canvas>
+  </div>
 
   <!-- ═══ Betting Panel (slides under player card) ═══ -->
   <div id="betting-panel" class="betting-panel" style="display:none"></div>

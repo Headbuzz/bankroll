@@ -29,6 +29,11 @@ let _reconnectTimer = null; // auto-reconnect timer handle
 let _decisionActive = false; // Decision guard: true while player is making buy/jail decision
 let _lastAnimatedKey = '';   // Dedupe: tracks last animated financial event to prevent double animation
 
+// ── Net Worth Race Strip data ─────────────────────────────────────────
+const nwHistory = { p1: [], p2: [], turns: [] };
+const RACE_COLORS = { p1: '#FF6E6E', p2: '#64B5F6' }; // bright on dark bg
+const MAX_VISIBLE_POINTS = 24;
+
 /* ── Event type constants — never use raw strings, prevents typos ──
    Keep the string VALUES identical to what is stored in the DB.
    Usage: pushSyncState({ type: EV.ROLL, ... }) */
@@ -1611,6 +1616,134 @@ function setupPopupClose() {
 
 
 /* ══════════════════════════════════════════════
+   NET WORTH RACE STRIP
+   ============================================== */
+function initRaceStrip() {
+  const canvas = document.getElementById('race-canvas');
+  if (!canvas) return;
+  const strip = document.getElementById('race-strip');
+  // Set canvas pixel dimensions to match CSS layout (2x for retina)
+  const dpr = window.devicePixelRatio || 1;
+  const rect = strip.getBoundingClientRect();
+  const w = rect.width - 28; // subtract padding
+  const h = rect.height - 16;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.getContext('2d').scale(dpr, dpr);
+  // Only record initial data on first call (not on resize)
+  if (nwHistory.turns.length === 0) recordNetWorth();
+  drawRaceStrip();
+}
+
+function recordNetWorth() {
+  const turn = nwHistory.turns.length;
+  nwHistory.p1.push(calculateNetWorth('p1'));
+  nwHistory.p2.push(calculateNetWorth('p2'));
+  nwHistory.turns.push(turn);
+}
+
+function drawRaceStrip() {
+  const canvas = document.getElementById('race-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.width / dpr;
+  const H = canvas.height / dpr;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Determine visible data window
+  const total = nwHistory.turns.length;
+  const start = Math.max(0, total - MAX_VISIBLE_POINTS);
+  const p1 = nwHistory.p1.slice(start);
+  const p2 = nwHistory.p2.slice(start);
+  const len = p1.length;
+  if (len < 1) return;
+
+  const wt = state.winTarget || 10000;
+  // Y-axis: 0 at bottom = $0, top = winTarget * 1.05
+  const yMax = wt * 1.05;
+  const toY = v => H - (Math.min(v, yMax) / yMax) * H;
+  const toX = i => len === 1 ? W / 2 : (i / (len - 1)) * (W - 40) + 20; // 20px margins
+
+  // Win target hairline
+  const targetY = toY(wt);
+  ctx.save();
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, targetY);
+  ctx.lineTo(W, targetY);
+  ctx.stroke();
+  ctx.restore();
+  // Win target label
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.font = '600 8px Inter, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText('🏁 $' + (wt / 1000).toFixed(0) + 'k', W - 2, targetY - 3);
+
+  // Draw helper: smooth line with quadraticCurveTo
+  function drawLine(data, color) {
+    if (data.length < 2) {
+      // Single point — draw a dot
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(toX(0), toY(data[0]), 3, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    ctx.beginPath();
+    ctx.moveTo(toX(0), toY(data[0]));
+    for (let i = 1; i < data.length; i++) {
+      const x0 = toX(i - 1), y0 = toY(data[i - 1]);
+      const x1 = toX(i), y1 = toY(data[i]);
+      const cx = (x0 + x1) / 2;
+      ctx.quadraticCurveTo(x0, y0, cx, (y0 + y1) / 2);
+    }
+    // Final segment
+    ctx.lineTo(toX(data.length - 1), toY(data[data.length - 1]));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    // Endpoint dot
+    const ex = toX(data.length - 1), ey = toY(data[data.length - 1]);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(ex, ey, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Draw P2 first (behind), then P1 (on top if local is P1)
+  const drawOrder = localId === 'p1' ? ['p2', 'p1'] : ['p1', 'p2'];
+  const datasets = { p1, p2 };
+  drawOrder.forEach(slot => drawLine(datasets[slot], RACE_COLORS[slot]));
+
+  // Endpoint value labels
+  function drawLabel(data, color, slot) {
+    const lastVal = data[data.length - 1];
+    const ex = toX(data.length - 1);
+    const ey = toY(lastVal);
+    const label = lastVal >= 1000 ? '$' + (lastVal / 1000).toFixed(1) + 'k' : '$' + lastVal;
+    ctx.font = '700 9px Inter, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = color;
+    // Offset label up or down to avoid overlap
+    const otherSlot = slot === 'p1' ? 'p2' : 'p1';
+    const otherVal = datasets[otherSlot][data.length - 1];
+    const yOff = lastVal >= otherVal ? -7 : 10;
+    ctx.fillText(label, ex + 6, ey + yOff);
+  }
+  drawLabel(p1, RACE_COLORS.p1, 'p1');
+  drawLabel(p2, RACE_COLORS.p2, 'p2');
+}
+
+
+/* ══════════════════════════════════════════════
    HUD
    ============================================== */
 function renderHUD() {
@@ -1757,6 +1890,9 @@ function _switchTurnUI() {
   if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150 && !state.bet?.active) {
     showBettingPanel(waitingPlayer);
   }
+  // Update race strip after each turn
+  recordNetWorth();
+  drawRaceStrip();
 }
 
 
@@ -2371,6 +2507,7 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
 
   renderHUD();
   syncBoardState();
+  drawRaceStrip(); // Keep chart in sync with latest state
 }
 
 // fromBroadcast=true: skip balance and ownership merge (untrusted client broadcast).
@@ -2454,7 +2591,7 @@ async function init() {
   setupPopupClose();
   setupChat();
   resizeBoard();
-  window.addEventListener('resize', resizeBoard);
+  window.addEventListener('resize', () => { resizeBoard(); initRaceStrip(); });
   // Preload all board tile images into browser cache so property cards show instantly.
   // Use requestIdleCallback where supported; fall back to setTimeout for older browsers.
   const preload = () => BOARD.forEach(s => { if (s.image) { new Image().src = IMG + s.image; } });
@@ -2502,6 +2639,9 @@ async function init() {
     syncBoardState();
   }
   startTurnTimer();
+
+  // Initialize the net worth race strip chart
+  initRaceStrip();
 
   // Warm-up ping: pre-warm the Edge Function to eliminate cold-start latency on first roll
   supabase.functions.invoke('game_action', { body: { action: 'ping' } }).catch(() => {});
