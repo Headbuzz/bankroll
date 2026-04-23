@@ -564,7 +564,7 @@ function showCenterIdle() {
   }
 }
 
-function showCenterEvent(text, imageSrc, priceText, type) {
+function showCenterEvent(text, imageSrc, priceText, type, color) {
   if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
   if (centerIdle) centerIdle.style.display = 'none';
 
@@ -581,6 +581,11 @@ function showCenterEvent(text, imageSrc, priceText, type) {
       centerEvent.setAttribute('data-type', evType);
     } else {
       centerEvent.removeAttribute('data-type');
+    }
+    if (color) {
+      centerEvent.style.setProperty('--ev-accent', color);
+    } else {
+      centerEvent.style.removeProperty('--ev-accent');
     }
   }
   // Badge
@@ -628,7 +633,8 @@ function showCenterBuyDecision(space) {
     if (overlayEl?.classList.contains('overlay--active')) hidePropertyCard();
     // Cancel any pending flash so it doesn't wipe the decision prompt
     if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
-    showCenterEvent(space.name, space.image, null, 'buy');
+    const color = space.type === 'city' && TIERS[space.tier] ? TIERS[space.tier].color : '#546E7A';
+    showCenterEvent(space.name, space.image, null, 'buy', color);
 
     // Rich decision content: balance impact + rent preview + countdown bar
     const player = state.players[state.turn];
