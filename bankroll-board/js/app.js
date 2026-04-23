@@ -1165,9 +1165,9 @@ function showBettingPanel(bettorId) {
   });
 
   if (bettorId === 'p1') {
-    panel.style.left = '16px'; panel.style.right = 'auto'; panel.style.bottom = '170px';
+    panel.style.left = '16px'; panel.style.right = 'auto'; panel.style.bottom = '260px';
   } else {
-    panel.style.right = '16px'; panel.style.left = 'auto'; panel.style.bottom = '170px';
+    panel.style.right = '16px'; panel.style.left = 'auto'; panel.style.bottom = '260px';
   }
 
   panel.innerHTML = `
@@ -1754,7 +1754,7 @@ function renderBalances() {
     const nwColor = nwPct >= 90 ? '#E53935' : nwPct >= 75 ? '#FF9800' : nwPct >= 50 ? '#FFC107' : '#4CAF50';
     const bar = document.querySelector(`#${hudId}-hud .hud-player__nw-bar`);
     if (bar) { bar.style.width = `${nwPct}%`; bar.style.background = nwColor; }
-    const nwLabel = document.querySelector(`#${hudId}-hud .hud-player__net span:nth-child(2)`);
+    const nwLabel = document.querySelector(`#${hudId}-hud .hud-player__net-value`);
     if (nwLabel) { nwLabel.textContent = `$${nw.toLocaleString()} / $${state.winTarget.toLocaleString()}`; nwLabel.style.color = nwColor; }
     const pctEl = document.querySelector(`#${hudId}-hud .hud-player__nw-pct`);
     if (pctEl) { pctEl.textContent = `${nwPct}%`; pctEl.style.color = nwColor; }
@@ -1838,23 +1838,17 @@ function renderPlayerCard(elId, player, playerId) {
     </div>
     <div class="hud-player__finance">
       <div class="hud-player__balance ${player.balance < 0 ? 'hud-player__balance--negative' : ''}">$${player.balance.toLocaleString()}${deltaHtml}</div>
-      <div class="hud-player__spark-wrap">
-        <canvas class="hud-player__spark-canvas" id="spark-${playerId}"></canvas>
-      </div>
       <div class="hud-player__nw-bar-wrap">
         <div class="hud-player__nw-bar" style="width:${nwPct}%;background:${nwBarColor}"></div>
       </div>
       <div class="hud-player__net">
-        <span>Net Worth</span>
-        <span style="color:${nwBarColor};font-weight:700">$${netWorth.toLocaleString()} / $${state.winTarget.toLocaleString()}</span>
+        <span class="hud-player__net-label">Net Worth</span>
+        <span class="hud-player__net-value" style="color:${nwBarColor}">$${netWorth.toLocaleString()} / $${state.winTarget.toLocaleString()}</span>
         <span class="hud-player__nw-pct" style="color:${nwBarColor}">${nwPct}%</span>
       </div>
     </div>
     ${footerHtml}
   `;
-
-  // Draw sparkline on the just-inserted canvas
-  drawPlayerSparkline(playerId);
 
   document.getElementById(`btn-roll-${playerId}`)?.addEventListener('click', onRollClick);
   document.getElementById(`btn-trade-${playerId}`)?.addEventListener('click', onTradeClick);

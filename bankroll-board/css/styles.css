@@ -536,28 +536,13 @@ body {
   background: rgba(0,0,0,0.04);
 }
 
-/* Sparkline */
-.hud-player__spark-wrap {
-  width: 100%;
-  height: 40px;
-  margin: 6px 0 4px;
-  border-radius: 6px;
-  overflow: hidden;
-  position: relative;
-}
-.hud-player__spark-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-
 /* Progress track + net worth */
 .hud-player__nw-bar-wrap {
   width: 100%;
   height: 3px;
   background: rgba(0,0,0,0.06);
   border-radius: 2px;
-  margin: 2px 0 4px;
+  margin: 8px 0 6px;
   overflow: hidden;
 }
 .hud-player__nw-bar {
@@ -567,16 +552,26 @@ body {
 }
 .hud-player__net {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
   font-size: 10px;
+  line-height: 1.4;
+}
+.hud-player__net-label {
   color: rgba(0,0,0,0.35);
   font-weight: 500;
+  white-space: nowrap;
+}
+.hud-player__net-value {
+  font-weight: 700;
+  white-space: nowrap;
 }
 .hud-player__nw-pct {
   font-size: 10px;
   font-weight: 700;
   margin-left: auto;
+  white-space: nowrap;
 }
 
 /* ── Zone 3: Footer (badge + buttons) ── */
