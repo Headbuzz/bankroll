@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
-  <link href="css/styles.css?v=21" rel="stylesheet"/>
+  <link href="css/styles.css?v=22" rel="stylesheet"/>
 </head>
 <body>
   <!-- Auth Guard: Ensure player belongs in a room -->
@@ -56,8 +56,10 @@
           <img src="assets/images/centralpool.png" alt="Staking Pool" class="center-idle__icon"/>
           <span class="center-idle__label">STAKING POOL</span>
           <span id="center-amount" class="center-idle__amount">$0</span>
+          <span id="center-last-event" class="center-idle__last-event"></span>
         </div>
         <div id="center-event" class="center-event" style="display:none">
+          <span id="center-event-badge" class="center-event__badge"></span>
           <span id="center-event-text" class="center-event__text"></span>
           <img id="center-event-image" class="center-event__image" src="" alt=""/>
           <div id="center-event-price" class="center-event__price"></div>

@@ -434,43 +434,182 @@ async function animateDice(val) {
    ============================================== */
 const centerIdle   = document.getElementById('center-idle');
 const centerEvent  = document.getElementById('center-event');
+const eventBadge   = document.getElementById('center-event-badge');
 const eventText    = document.getElementById('center-event-text');
 const eventImage   = document.getElementById('center-event-image');
 const eventPrice   = document.getElementById('center-event-price');
 const eventActions = document.getElementById('center-event-actions');
+const lastEventEl  = document.getElementById('center-last-event');
 
-function showCenterIdle() {
-  if (centerEvent) centerEvent.style.display = 'none';
-  if (centerIdle) centerIdle.style.display = 'flex';
-  updateStakingPoolDisplay();
+// ── Event type badge map ──
+const EVENT_BADGES = {
+  buy: 'PURCHASED', rent: 'RENT PAID', lucky: 'LUCKY CARD',
+  staking: 'JACKPOT', jail: 'JAILED', trade: 'TRADE',
+  genesis: 'GENESIS', bet: 'BET PLACED', kick: 'KICKED',
+  sell: 'SOLD', build: 'BUILT', info: ''
+};
+
+// ── Auto-detect event type from text content ──
+function _detectEventType(text, imageSrc) {
+  if (!text) return '';
+  const t = text.toLowerCase();
+  if (t.includes('bought') || t.includes('monopoly secured'))      return 'buy';
+  if (t.includes('rent') || t.includes('paid $'))                  return 'rent';
+  if (t.includes('lucky') || (imageSrc && imageSrc.includes('lucky'))) return 'lucky';
+  if (t.includes('staking') || t.includes('jackpot') || t.includes('won') && t.includes('pool')) return 'staking';
+  if (t.includes('jail') || t.includes('jailed') || t.includes('sentence') || t.includes('escape')) return 'jail';
+  if (t.includes('trade') || t.includes('🤝'))                     return 'trade';
+  if (t.includes('collected $200') || t.includes('genesis'))       return 'genesis';
+  if (t.includes('bet'))                                           return 'bet';
+  if (t.includes('kick') || t.includes('afk'))                     return 'kick';
+  if (t.includes('sold'))                                          return 'sell';
+  if (t.includes('built'))                                         return 'build';
+  if (t.includes('bankrupt'))                                      return 'kick';
+  if (t.includes("can't afford"))                                  return 'rent';
+  return '';
 }
+
+// ── Last event log ──
+let _lastEventText = '';
+let _lastEventTime = 0;
+let _lastEventInterval = null;
+
+function _setLastEvent(text) {
+  _lastEventText = text.replace(/[\u{1F000}-\u{1FFFF}]/gu, '').trim(); // strip emoji
+  _lastEventTime = Date.now();
+  _updateLastEventDisplay();
+  // Update every 10s to keep "Xs ago" fresh
+  if (_lastEventInterval) clearInterval(_lastEventInterval);
+  _lastEventInterval = setInterval(_updateLastEventDisplay, 10000);
+}
+function _updateLastEventDisplay() {
+  if (!lastEventEl || !_lastEventText) return;
+  const ago = Math.round((Date.now() - _lastEventTime) / 1000);
+  const agoStr = ago < 10 ? 'just now' : ago < 60 ? `${ago}s ago` : `${Math.round(ago/60)}m ago`;
+  lastEventEl.textContent = `${_lastEventText} · ${agoStr}`;
+}
+
+// ── Staking pool with counting animation ──
+let _displayedPool = null;
+let _poolAnimFrame = null;
 function updateStakingPoolDisplay() {
   const el = document.getElementById('center-amount');
-  if (el) el.textContent = `$${state.stakingPool}`;
+  const target = state.stakingPool;
+  if (!el) return;
 
+  // Update corner tile text directly
   const tile = boardEl.querySelector(`[data-space-id="14"]`);
   if (tile) {
     const sub = tile.querySelector('.tile__corner-sub');
-    if (sub) sub.textContent = `Pool: $${state.stakingPool}`;
+    if (sub) sub.textContent = `Pool: $${target}`;
+  }
+
+  // First call or idle not visible — set directly
+  if (_displayedPool === null || centerIdle?.style.display === 'none') {
+    _displayedPool = target;
+    el.textContent = `$${target}`;
+    return;
+  }
+
+  const diff = target - _displayedPool;
+  if (diff === 0) return;
+
+  // Cancel existing animation
+  if (_poolAnimFrame) cancelAnimationFrame(_poolAnimFrame);
+
+  const startVal = _displayedPool;
+  const duration = Math.min(800, Math.max(400, Math.abs(diff) * 3));
+  const startTime = performance.now();
+
+  // Pulse on change
+  el.classList.add('center-idle__amount--pulse');
+  setTimeout(() => el.classList.remove('center-idle__amount--pulse'), 400);
+
+  function tick(now) {
+    const t = Math.min((now - startTime) / duration, 1);
+    const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    const current = Math.round(startVal + diff * eased);
+    _displayedPool = current;
+    el.textContent = `$${current}`;
+    if (t < 1) {
+      _poolAnimFrame = requestAnimationFrame(tick);
+    } else {
+      _displayedPool = target;
+      el.textContent = `$${target}`;
+    }
+  }
+  _poolAnimFrame = requestAnimationFrame(tick);
+}
+
+// ── Show/hide with exit animation ──
+let _exitTimer = null;
+
+function showCenterIdle() {
+  if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
+  // Exit animation on event card (if visible)
+  if (centerEvent && centerEvent.style.display !== 'none') {
+    centerEvent.classList.add('center-event--exiting');
+    _exitTimer = setTimeout(() => {
+      centerEvent.style.display = 'none';
+      centerEvent.classList.remove('center-event--exiting');
+      centerEvent.removeAttribute('data-type');
+      if (centerIdle) centerIdle.style.display = 'flex';
+      updateStakingPoolDisplay();
+      _exitTimer = null;
+    }, 150);
+  } else {
+    if (centerEvent) { centerEvent.style.display = 'none'; centerEvent.removeAttribute('data-type'); }
+    if (centerIdle) centerIdle.style.display = 'flex';
+    updateStakingPoolDisplay();
   }
 }
-function showCenterEvent(text, imageSrc, priceText) {
+
+function showCenterEvent(text, imageSrc, priceText, type) {
+  if (_exitTimer) { clearTimeout(_exitTimer); _exitTimer = null; }
   if (centerIdle) centerIdle.style.display = 'none';
-  if (centerEvent) { centerEvent.style.display = 'flex'; centerEvent.style.animation = 'none'; centerEvent.offsetHeight; centerEvent.style.animation = ''; }
+
+  // Determine event type (explicit or auto-detected)
+  const evType = type || _detectEventType(text, imageSrc);
+
+  if (centerEvent) {
+    centerEvent.classList.remove('center-event--exiting');
+    centerEvent.style.display = 'flex';
+    centerEvent.style.animation = 'none';
+    centerEvent.offsetHeight; // force reflow
+    centerEvent.style.animation = '';
+    if (evType) {
+      centerEvent.setAttribute('data-type', evType);
+    } else {
+      centerEvent.removeAttribute('data-type');
+    }
+  }
+  // Badge
+  if (eventBadge) {
+    const badgeText = EVENT_BADGES[evType] || '';
+    eventBadge.textContent = badgeText;
+    eventBadge.style.display = badgeText ? 'block' : 'none';
+  }
   if (eventText) eventText.textContent = text;
-  if (eventImage) { if (imageSrc) { eventImage.src = IMG + imageSrc; eventImage.style.display = 'block'; } else { eventImage.style.display = 'none'; } }
-  if (eventPrice) { if (priceText) { eventPrice.textContent = priceText; eventPrice.style.display = 'block'; } else { eventPrice.style.display = 'none'; } }
+  if (eventImage) {
+    if (imageSrc) { eventImage.src = IMG + imageSrc; eventImage.style.display = 'block'; }
+    else { eventImage.style.display = 'none'; }
+  }
+  if (eventPrice) {
+    if (priceText) { eventPrice.textContent = priceText; eventPrice.style.display = 'block'; }
+    else { eventPrice.style.display = 'none'; }
+  }
   if (eventActions) eventActions.style.display = 'none';
 }
+
 // Pending flash timer — cleared when a decision prompt takes over
 let pendingFlashTimer = null;
 
-function showCenterDecision(text, imageSrc, buttons) {
+function showCenterDecision(text, imageSrc, buttons, type) {
   _decisionActive = true; // GUARD: protect this UI from incoming broadcasts
   return new Promise(resolve => {
     // Cancel any pending flash so it doesn't wipe the decision prompt
     if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
-    showCenterEvent(text, imageSrc, null);
+    showCenterEvent(text, imageSrc, null, type || 'jail');
     if (eventActions) {
       eventActions.style.display = 'flex';
       eventActions.innerHTML = buttons.map(b => `<button class="btn ${b.cls}" id="${b.id}">${b.label}</button>`).join('');
@@ -481,6 +620,7 @@ function showCenterDecision(text, imageSrc, buttons) {
     } else { _decisionActive = false; resolve(buttons[0]?.value); }
   });
 }
+
 function showCenterBuyDecision(space) {
   _decisionActive = true; // GUARD: protect this UI from incoming broadcasts
   return new Promise(resolve => {
@@ -488,18 +628,74 @@ function showCenterBuyDecision(space) {
     if (overlayEl?.classList.contains('overlay--active')) hidePropertyCard();
     // Cancel any pending flash so it doesn't wipe the decision prompt
     if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
-    showCenterEvent(space.name, space.image, `$${space.price}`);
+    showCenterEvent(space.name, null, null, 'buy');
+
+    // Rich decision content: balance impact + rent preview + countdown bar
+    const player = state.players[state.turn];
+    const bal = player?.balance ?? 0;
+    const afterBal = bal - space.price;
+    const rentVal = space.type === 'utility' ? 20 : (TIER_ECONOMY[space.tier]?.base || 0);
+    const afterCls = afterBal < 0 ? 'center-decision__row-value--red' : 'center-decision__row-value--green';
+
+    // Build info block + countdown bar + action buttons
+    const infoHtml = `
+      <div class="center-decision__info">
+        <div class="center-decision__row">
+          <span>Price</span>
+          <span class="center-decision__row-value">$${space.price}</span>
+        </div>
+        <div class="center-decision__row">
+          <span>Rent income</span>
+          <span class="center-decision__row-value center-decision__row-value--green">$${rentVal}/turn</span>
+        </div>
+        <div class="center-decision__impact">
+          <span>Balance</span>
+          <span>$${bal.toLocaleString()} <span class="center-decision__impact-arrow">→</span> <span class="${afterCls}">$${afterBal.toLocaleString()}</span></span>
+        </div>
+      </div>
+      <div class="decision-countdown-wrap"><div id="decision-countdown-bar" class="decision-countdown-bar"></div></div>
+    `;
+
     if (eventActions) {
       eventActions.style.display = 'flex';
-      eventActions.innerHTML = `<button class="btn btn--buy-center" id="center-buy">BUY — $${space.price}</button><button class="btn btn--pass-center" id="center-pass">PASS</button>`;
+      // Insert info block before actions
+      const infoContainer = document.createElement('div');
+      infoContainer.style.width = '100%';
+      infoContainer.innerHTML = infoHtml;
+      // Insert before actions element
+      centerEvent.insertBefore(infoContainer, eventActions);
+
+      const canAfford = afterBal >= 0;
+      eventActions.innerHTML = `<button class="btn btn--buy-center ${canAfford ? '' : 'btn--disabled'}" id="center-buy" ${canAfford ? '' : 'disabled'}>BUY — $${space.price}</button><button class="btn btn--pass-center" id="center-pass">PASS</button>`;
+
       let resolved = false;
-      const unbind = () => { if (resolved) return; resolved = true; _decisionActive = false; eventActions.style.display = 'none'; window.resolveActiveDecision = null; };
+      const unbind = () => {
+        if (resolved) return; resolved = true; _decisionActive = false;
+        eventActions.style.display = 'none';
+        infoContainer.remove();
+        window.resolveActiveDecision = null;
+      };
       window.resolveActiveDecision = () => { unbind(); resolve('pass'); };
-      document.getElementById('center-buy').addEventListener('click', () => { unbind(); resolve('buy'); });
+      if (canAfford) {
+        document.getElementById('center-buy').addEventListener('click', () => { unbind(); resolve('buy'); });
+      }
       document.getElementById('center-pass').addEventListener('click', () => { unbind(); resolve('pass'); });
+
+      // Start countdown bar animation (synced to turnTimeLeft which is set to 20 before this call)
+      requestAnimationFrame(() => {
+        const bar = document.getElementById('decision-countdown-bar');
+        if (bar) {
+          bar.style.transition = 'none';
+          bar.style.width = '100%';
+          bar.offsetHeight; // reflow
+          bar.style.transition = `width ${turnTimerMax}s linear`;
+          bar.style.width = '0%';
+        }
+      });
     } else { _decisionActive = false; resolve('pass'); }
   });
 }
+
 // flashCenterEvent: shows notification in center board for exactly 20 seconds.
 // The Promise resolves after a SHORT pacing delay (game flow continues), but the visual stays.
 // When _decisionActive is true, redirects to toast to avoid destroying buy/jail decision UI.
@@ -513,8 +709,10 @@ function flashCenterEvent(text, imageSrc, priceText, ms = 1500) {
   // Cancel any previous 20s dismiss timer
   if (_flashDismissTimer) { clearTimeout(_flashDismissTimer); _flashDismissTimer = null; }
   if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
-  // Show the notification
+  // Show the notification (type auto-detected from text)
   showCenterEvent(text, imageSrc, priceText);
+  // Track for last-event display
+  _setLastEvent(text);
   // Auto-dismiss after exactly 20 seconds (returns to idle)
   _flashDismissTimer = setTimeout(() => { _flashDismissTimer = null; showCenterIdle(); }, 20000);
   // Resolve Promise after short pacing delay — game flow continues, notification stays
@@ -2154,6 +2352,12 @@ function updateTimerUI() {
       barEl.style.backgroundColor = turnTimeLeft <= 10 ? '#E53935' : 'var(--accent-roll)';
     }
   });
+  // Decision countdown bar color shift (if active)
+  const dcBar = document.getElementById('decision-countdown-bar');
+  if (dcBar) {
+    dcBar.classList.toggle('decision-countdown-bar--warn', turnTimeLeft <= 10 && turnTimeLeft > 5);
+    dcBar.classList.toggle('decision-countdown-bar--crit', turnTimeLeft <= 5);
+  }
 }
 
 function handleTurnTimeout() {
