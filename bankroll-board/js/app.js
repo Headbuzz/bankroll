@@ -29,9 +29,8 @@ let _reconnectTimer = null; // auto-reconnect timer handle
 let _decisionActive = false; // Decision guard: true while player is making buy/jail decision
 let _lastAnimatedKey = '';   // Dedupe: tracks last animated financial event to prevent double animation
 
-// ── Net Worth Race Strip data ─────────────────────────────────────────
+// ── In-Card Sparkline data ────────────────────────────────────────────
 const nwHistory = { p1: [], p2: [], turns: [] };
-const RACE_COLORS = { p1: '#FF6E6E', p2: '#64B5F6' }; // bright on dark bg
 const MAX_VISIBLE_POINTS = 24;
 
 /* ── Event type constants — never use raw strings, prevents typos ──
@@ -1616,27 +1615,8 @@ function setupPopupClose() {
 
 
 /* ══════════════════════════════════════════════
-   NET WORTH RACE STRIP
+   IN-CARD SPARKLINE (Robinhood-style)
    ============================================== */
-function initRaceStrip() {
-  const canvas = document.getElementById('race-canvas');
-  if (!canvas) return;
-  const strip = document.getElementById('race-strip');
-  // Set canvas pixel dimensions to match CSS layout (2x for retina)
-  const dpr = window.devicePixelRatio || 1;
-  const rect = strip.getBoundingClientRect();
-  const w = rect.width - 28; // subtract padding
-  const h = rect.height - 16;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  canvas.style.width = w + 'px';
-  canvas.style.height = h + 'px';
-  canvas.getContext('2d').scale(dpr, dpr);
-  // Only record initial data on first call (not on resize)
-  if (nwHistory.turns.length === 0) recordNetWorth();
-  drawRaceStrip();
-}
-
 function recordNetWorth() {
   const turn = nwHistory.turns.length;
   nwHistory.p1.push(calculateNetWorth('p1'));
@@ -1644,102 +1624,92 @@ function recordNetWorth() {
   nwHistory.turns.push(turn);
 }
 
-function drawRaceStrip() {
-  const canvas = document.getElementById('race-canvas');
+function drawPlayerSparkline(playerId) {
+  const canvas = document.getElementById(`spark-${playerId}`);
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
+  const data = nwHistory[playerId];
+  if (!data || data.length < 1) return;
+
+  // Setup retina-aware canvas
   const dpr = window.devicePixelRatio || 1;
-  const W = canvas.width / dpr;
-  const H = canvas.height / dpr;
+  const wrap = canvas.parentElement;
+  const W = wrap.offsetWidth;
+  const H = wrap.offsetHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Visible window (last N points)
+  const start = Math.max(0, data.length - MAX_VISIBLE_POINTS);
+  const pts = data.slice(start);
+  const len = pts.length;
+
+  // Determine trend: compare last to first
+  const first = pts[0];
+  const last = pts[len - 1];
+  const gaining = last >= first;
+  const lineColor = gaining ? '#26A69A' : '#EF5350'; // teal or red
+  const fillColor = gaining ? 'rgba(38,166,154,' : 'rgba(239,83,80,';
+
+  // Auto-scale Y to player's own range (makes small changes dramatic)
+  const lo = Math.min(...pts);
+  const hi = Math.max(...pts);
+  const range = hi - lo || 1;
+  const pad = range * 0.15;
+  const yMin = lo - pad;
+  const yMax = hi + pad;
+
+  const toY = v => H - ((v - yMin) / (yMax - yMin)) * H;
+  const toX = i => len === 1 ? W / 2 : (i / (len - 1)) * W;
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Determine visible data window
-  const total = nwHistory.turns.length;
-  const start = Math.max(0, total - MAX_VISIBLE_POINTS);
-  const p1 = nwHistory.p1.slice(start);
-  const p2 = nwHistory.p2.slice(start);
-  const len = p1.length;
-  if (len < 1) return;
-
-  const wt = state.winTarget || 10000;
-  // Y-axis: 0 at bottom = $0, top = winTarget * 1.05
-  const yMax = wt * 1.05;
-  const toY = v => H - (Math.min(v, yMax) / yMax) * H;
-  const toX = i => len === 1 ? W / 2 : (i / (len - 1)) * (W - 40) + 20; // 20px margins
-
-  // Win target hairline
-  const targetY = toY(wt);
-  ctx.save();
-  ctx.setLineDash([4, 4]);
-  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, targetY);
-  ctx.lineTo(W, targetY);
-  ctx.stroke();
-  ctx.restore();
-  // Win target label
-  ctx.fillStyle = 'rgba(255,255,255,0.25)';
-  ctx.font = '600 8px Inter, sans-serif';
-  ctx.textAlign = 'right';
-  ctx.fillText('🏁 $' + (wt / 1000).toFixed(0) + 'k', W - 2, targetY - 3);
-
-  // Draw helper: smooth line with quadraticCurveTo
-  function drawLine(data, color) {
-    if (data.length < 2) {
-      // Single point — draw a dot
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(toX(0), toY(data[0]), 3, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
+  if (len < 2) {
+    // Single point — draw a dot
+    ctx.fillStyle = lineColor;
     ctx.beginPath();
-    ctx.moveTo(toX(0), toY(data[0]));
-    for (let i = 1; i < data.length; i++) {
-      const x0 = toX(i - 1), y0 = toY(data[i - 1]);
-      const x1 = toX(i), y1 = toY(data[i]);
-      const cx = (x0 + x1) / 2;
-      ctx.quadraticCurveTo(x0, y0, cx, (y0 + y1) / 2);
-    }
-    // Final segment
-    ctx.lineTo(toX(data.length - 1), toY(data[data.length - 1]));
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    ctx.stroke();
-
-    // Endpoint dot
-    const ex = toX(data.length - 1), ey = toY(data[data.length - 1]);
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(ex, ey, 3, 0, Math.PI * 2);
+    ctx.arc(toX(0), toY(pts[0]), 3, 0, Math.PI * 2);
     ctx.fill();
+    return;
   }
 
-  // Draw P2 first (behind), then P1 (on top if local is P1)
-  const drawOrder = localId === 'p1' ? ['p2', 'p1'] : ['p1', 'p2'];
-  const datasets = { p1, p2 };
-  drawOrder.forEach(slot => drawLine(datasets[slot], RACE_COLORS[slot]));
-
-  // Endpoint value labels
-  function drawLabel(data, color, slot) {
-    const lastVal = data[data.length - 1];
-    const ex = toX(data.length - 1);
-    const ey = toY(lastVal);
-    const label = lastVal >= 1000 ? '$' + (lastVal / 1000).toFixed(1) + 'k' : '$' + lastVal;
-    ctx.font = '700 9px Inter, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillStyle = color;
-    // Offset label up or down to avoid overlap
-    const otherSlot = slot === 'p1' ? 'p2' : 'p1';
-    const otherVal = datasets[otherSlot][data.length - 1];
-    const yOff = lastVal >= otherVal ? -7 : 10;
-    ctx.fillText(label, ex + 6, ey + yOff);
+  // Build smooth path
+  ctx.beginPath();
+  ctx.moveTo(toX(0), toY(pts[0]));
+  for (let i = 1; i < len; i++) {
+    const x0 = toX(i - 1), y0 = toY(pts[i - 1]);
+    const x1 = toX(i), y1 = toY(pts[i]);
+    const cx = (x0 + x1) / 2;
+    ctx.quadraticCurveTo(x0, y0, cx, (y0 + y1) / 2);
   }
-  drawLabel(p1, RACE_COLORS.p1, 'p1');
-  drawLabel(p2, RACE_COLORS.p2, 'p2');
+  ctx.lineTo(toX(len - 1), toY(pts[len - 1]));
+
+  // Stroke the line
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 1.8;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // Gradient area fill under the curve
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, fillColor + '0.18)');
+  grad.addColorStop(1, fillColor + '0.0)');
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Endpoint dot
+  const ex = toX(len - 1), ey = toY(pts[len - 1]);
+  ctx.fillStyle = lineColor;
+  ctx.beginPath();
+  ctx.arc(ex, ey, 2.5, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 
@@ -1800,6 +1770,19 @@ function renderPlayerCard(elId, player, playerId) {
   const nwPct = Math.min(100, Math.round((netWorth / state.winTarget) * 100));
   const nwBarColor = nwPct >= 90 ? '#E53935' : nwPct >= 75 ? '#FF9800' : nwPct >= 50 ? '#FFC107' : '#4CAF50';
 
+  // Delta badge: show change since last recorded data point
+  const history = nwHistory[playerId];
+  let deltaHtml = '';
+  if (history && history.length >= 2) {
+    const prev = history[history.length - 2];
+    const diff = netWorth - prev;
+    if (diff > 0) {
+      deltaHtml = `<span class="hud-player__delta hud-player__delta--up">\u2191$${diff.toLocaleString()}</span>`;
+    } else if (diff < 0) {
+      deltaHtml = `<span class="hud-player__delta hud-player__delta--down">\u2193$${Math.abs(diff).toLocaleString()}</span>`;
+    }
+  }
+
   let timerHtml = '';
   if (isMyTurn && !state.gameOver) {
     timerHtml = `
@@ -1816,7 +1799,10 @@ function renderPlayerCard(elId, player, playerId) {
       <img class="hud-player__token-icon" src="${IMG}${player.tokenImg}" alt="${player.name}"/>
       ${player.name}
     </div>
-    <div class="hud-player__balance ${player.balance < 0 ? 'hud-player__balance--negative' : ''}">$${player.balance.toLocaleString()}</div>
+    <div class="hud-player__balance ${player.balance < 0 ? 'hud-player__balance--negative' : ''}">$${player.balance.toLocaleString()}${deltaHtml}</div>
+    <div class="hud-player__spark-wrap">
+      <canvas class="hud-player__spark-canvas" id="spark-${playerId}"></canvas>
+    </div>
     <div class="hud-player__nw-bar-wrap">
       <div class="hud-player__nw-bar" style="width:${nwPct}%;background:${nwBarColor}"></div>
     </div>
@@ -1827,6 +1813,9 @@ function renderPlayerCard(elId, player, playerId) {
     ${isMyTurn ? `<span class="hud-player__turn-badge">${inJail ? '🔒 In Jail' : 'Your Turn'}</span>` : ''}
     ${actionsHtml}
   `;
+
+  // Draw sparkline on the just-inserted canvas
+  drawPlayerSparkline(playerId);
 
   document.getElementById(`btn-roll-${playerId}`)?.addEventListener('click', onRollClick);
   document.getElementById(`btn-trade-${playerId}`)?.addEventListener('click', onTradeClick);
@@ -1884,15 +1873,14 @@ function switchTurnLocal() {
 // Shared UI logic for turn switch — extracted to avoid duplication
 function _switchTurnUI() {
   startTurnTimer();
+  // Record net worth BEFORE render so sparklines include the latest data point
+  recordNetWorth();
   renderHUD();
   hideBettingPanel();
   const waitingPlayer = state.turn === 'p1' ? 'p2' : 'p1';
   if (localId === waitingPlayer && state.players[waitingPlayer].balance >= 150 && !state.bet?.active) {
     showBettingPanel(waitingPlayer);
   }
-  // Update race strip after each turn
-  recordNetWorth();
-  drawRaceStrip();
 }
 
 
@@ -2507,7 +2495,6 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
 
   renderHUD();
   syncBoardState();
-  drawRaceStrip(); // Keep chart in sync with latest state
 }
 
 // fromBroadcast=true: skip balance and ownership merge (untrusted client broadcast).
@@ -2591,7 +2578,7 @@ async function init() {
   setupPopupClose();
   setupChat();
   resizeBoard();
-  window.addEventListener('resize', () => { resizeBoard(); initRaceStrip(); });
+  window.addEventListener('resize', resizeBoard);
   // Preload all board tile images into browser cache so property cards show instantly.
   // Use requestIdleCallback where supported; fall back to setTimeout for older browsers.
   const preload = () => BOARD.forEach(s => { if (s.image) { new Image().src = IMG + s.image; } });
@@ -2640,8 +2627,9 @@ async function init() {
   }
   startTurnTimer();
 
-  // Initialize the net worth race strip chart
-  initRaceStrip();
+  // Record initial net worth data point AFTER state is merged, then redraw cards with sparklines
+  recordNetWorth();
+  renderHUD();
 
   // Warm-up ping: pre-warm the Edge Function to eliminate cold-start latency on first roll
   supabase.functions.invoke('game_action', { body: { action: 'ping' } }).catch(() => {});
