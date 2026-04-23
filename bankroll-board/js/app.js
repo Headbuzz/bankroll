@@ -614,6 +614,8 @@ async function handleCorner(space, playerId) {
       // Handle buy/rent at teleport destination — return as finalEvent for atomic switchTurn
       if (!state.owners[target.id]) {
         if (player.balance >= target.price) {
+          turnTimeLeft = 20;
+          turnTimerMax = 20;
           resumeTurnTimer();
           const decision = await showCenterBuyDecision(target);
           stopTurnTimer();
@@ -658,6 +660,7 @@ async function handleCorner(space, playerId) {
 
   else if (space.subtype === 'staking') {
     const pool = state.stakingPool;
+    let stakePayout = 0, stakePct = 0;
     if (pool <= 0) {
       await flashCenterEvent('Staking Pool is empty!', 'centralpool.png', '$0', 1500);
     } else {
@@ -668,16 +671,17 @@ async function handleCorner(space, playerId) {
         return null;
       }
       const { payout, pct, newBalance, newPool } = res;
+      stakePayout = payout;
+      stakePct = pct;
       player.balance = newBalance;
       state.stakingPool = newPool;
       renderBalances();
       await flashCenterEvent(`${player.name} won ${pct}% of the Staking Pool!`, 'centralpool.png', `+$${payout}`, 2500);
       await animateCoins('bank', playerId, Math.min(Math.ceil(payout / 50), 10));
-      // Broadcast to P2 (server already persisted)
-      broadcastEvent({ type: 'STAKING_WIN', p: playerId, payout, pct });
+      // No standalone broadcast — event flows through switchTurn(finalEvent) to avoid race condition
       checkWin();
     }
-    return null; // staking doesn't generate a buy/rent finalEvent
+    return { type: 'STAKING_WIN', p: playerId, payout: stakePayout, pct: stakePct };
   }
 
   else if (space.subtype === 'jail') {
@@ -686,10 +690,9 @@ async function handleCorner(space, playerId) {
     player.position = 22;
     renderHUD();
     await flashCenterEvent(`${player.name} is going to Jail!`, 'jail.png', '\uD83D\uDD12 2 Turns', 1800);
-    // Broadcast to P2 (jail_sent is not a financial action, just state sync)
-    broadcastEvent({ type: 'JAIL_SENT', p: playerId });
+    // No standalone broadcast — event flows through switchTurn(finalEvent) to avoid race condition
     checkBankruptcy(playerId);
-    return null;
+    return { type: 'JAIL_SENT', p: playerId };
   }
 
   return null; // genesis/other corners — no event
@@ -1164,10 +1167,13 @@ function showBettingPanel(bettorId) {
     </button>`;
   });
 
+  // Dynamic positioning: sit just above the player card
+  const hudEl = document.getElementById(bettorId === 'p1' ? 'player1-hud' : 'player2-hud');
+  const cardBottom = hudEl ? (hudEl.offsetHeight + 24) : 260;
   if (bettorId === 'p1') {
-    panel.style.left = '16px'; panel.style.right = 'auto'; panel.style.bottom = '260px';
+    panel.style.left = '16px'; panel.style.right = 'auto'; panel.style.bottom = `${cardBottom}px`;
   } else {
-    panel.style.right = '16px'; panel.style.left = 'auto'; panel.style.bottom = '260px';
+    panel.style.right = '16px'; panel.style.left = 'auto'; panel.style.bottom = `${cardBottom}px`;
   }
 
   panel.innerHTML = `
@@ -1267,6 +1273,9 @@ async function onRollClick() {
       if (player.jailTurns === 2) {
         // FIRST jail turn: show the pay-or-serve decision exactly once.
         broadcastEvent({ type: 'JAIL_TURN', p: ap, turnsLeft: 2 });
+        // Decision timer: 20s for jail pay/serve — NOT the full 40s turn timer
+        turnTimeLeft = 20;
+        turnTimerMax = 20;
         resumeTurnTimer();
         const decision = await showCenterDecision(
           '\uD83D\uDD12 You are in Jail! Pay $150 to escape now, or serve (next turn auto-skipped).',
@@ -1390,7 +1399,9 @@ async function onRollClick() {
     if (landed && (landed.type === 'city' || landed.type === 'utility')) {
       if (!state.owners[landed.id]) {
         if (player.balance >= 0 && player.balance >= landed.price) {
-          // Timer only runs during the buy/pass decision — not during animations or rent payments
+          // Decision timer: 20s for buy/pass — NOT the full 40s turn timer
+          turnTimeLeft = 20;
+          turnTimerMax = 20;
           resumeTurnTimer();
           const decision = await showCenterBuyDecision(landed);
           stopTurnTimer();
@@ -2015,10 +2026,12 @@ function resizeBoard() {
    ============================================== */
 let turnTimerInterval = null;
 let turnTimeLeft = 40;
+let turnTimerMax = 40; // denominator for bar width (40 for turn, 20 for decision)
 
 function startTurnTimer() {
   clearInterval(turnTimerInterval);
   turnTimeLeft = 40;
+  turnTimerMax = 40;
   resumeTurnTimer();
 }
 
@@ -2055,7 +2068,7 @@ function updateTimerUI() {
     const barEl = document.getElementById(`turn-bar-${p}`);
     if (secEl) secEl.textContent = turnTimeLeft;
     if (barEl) {
-      barEl.style.width = `${(turnTimeLeft / 40) * 100}%`;
+      barEl.style.width = `${(turnTimeLeft / turnTimerMax) * 100}%`;
       barEl.style.backgroundColor = turnTimeLeft <= 10 ? '#E53935' : 'var(--accent-roll)';
     }
   });
@@ -2513,7 +2526,12 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
 
   // Use the fromBroadcast flag passed down from the caller:
   // broadcast path → true (skip balance), postgres_changes path → false (full merge)
+  // GUARD: Only END_TURN broadcasts may change the turn — mid-turn broadcasts carry stale turn data
+  const savedTurn = state.turn;
   mergeServerState(payloadState, fromBroadcast);
+  if (fromBroadcast && ev && ev.type !== 'END_TURN') {
+    state.turn = savedTurn; // restore — only END_TURN may switch turn
+  }
 
   // Restart timer only when turn changed
   if (payloadState.turn && payloadState.turn !== prevTurn) {
@@ -2680,6 +2698,7 @@ async function init() {
     if (ev?.type === 'ROLL') {
       if (_alreadySeen(ev.id)) return;
       _markSeen(ev.id);
+      hideBettingPanel(); // Opponent rolled — close our betting panel instantly
       await animateDice(ev.dice);
       await animateTokenAlongPath(ev.p, ev.oldPos, ev.dice, ev.passedGenesis);
       if (ev.passedGenesis) {
@@ -2713,11 +2732,29 @@ async function init() {
         await animateCoins(fe.p, fe.owner, Math.min(Math.ceil(fe.rent / 40), 8));
         const payerName = fullState.players?.[fe.p]?.name || 'Opponent';
         await flashCenterEvent(`${payerName} paid $${fe.rent} rent`, null, `-$${fe.rent}`, 1500);
+      } else if (fe.type === 'STAKING_WIN' && fe.payout > 0) {
+        const name = fullState.players?.[fe.p]?.name || 'Opponent';
+        await animateCoins('bank', fe.p, Math.min(Math.ceil(fe.payout / 50), 10));
+        await flashCenterEvent(`${name} won ${fe.pct}% of the Staking Pool!`, null, `+$${fe.payout}`, 2000);
+      } else if (fe.type === 'JAIL_SENT') {
+        const name = fullState.players?.[fe.p]?.name || 'Opponent';
+        await flashCenterEvent(`${name} was sent to Jail!`, null, '\uD83D\uDD12', 1500);
       }
       // NOW merge state and switch turn
       mergeServerState(fullState, true);
       renderHUD();
       syncBoardState();
+      // Restart timer + betting panel (was missing from fast-path — caused stuck timers)
+      const prevTurn = ev.player; // the player who just finished
+      if (fullState.turn && fullState.turn !== prevTurn) {
+        startTurnTimer();
+        const waitingPlayer = fullState.turn === 'p1' ? 'p2' : 'p1';
+        if (localId === waitingPlayer && state.players[waitingPlayer]?.balance >= 150 && !state.bet?.active) {
+          showBettingPanel(waitingPlayer);
+        } else {
+          hideBettingPanel();
+        }
+      }
       return;
     }
 
