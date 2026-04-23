@@ -628,7 +628,7 @@ function showCenterBuyDecision(space) {
     if (overlayEl?.classList.contains('overlay--active')) hidePropertyCard();
     // Cancel any pending flash so it doesn't wipe the decision prompt
     if (pendingFlashTimer) { clearTimeout(pendingFlashTimer); pendingFlashTimer = null; }
-    showCenterEvent(space.name, null, null, 'buy');
+    showCenterEvent(space.name, space.image, null, 'buy');
 
     // Rich decision content: balance impact + rent preview + countdown bar
     const player = state.players[state.turn];
