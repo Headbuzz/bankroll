@@ -136,7 +136,7 @@ body {
   border: 1px solid rgba(0,0,0,0.04);
   border-top: 6px solid var(--ev-accent, var(--text-dark));
   position: absolute;
-  top: 50%;
+  top: calc(50% - 25px);
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 15;
@@ -321,9 +321,9 @@ body {
   display: flex;
   justify-content: center;
   position: absolute;
-  top: 50%;
+  bottom: 24px;
   left: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   z-index: 20; /* Above the card image */
   pointer-events: none; /* Let clicks pass through to the card */
 }
