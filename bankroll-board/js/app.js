@@ -1772,33 +1772,64 @@ function animateBalanceTo(slot, targetValue) {
   if (diff === 0) {
     balEl.textContent = `$${targetValue.toLocaleString()}`;
     balEl.classList.toggle('hud-player__balance--negative', targetValue < 0);
+    balEl.style.transform = '';
     return;
   }
 
-  const duration = Math.min(600, Math.max(200, Math.abs(diff) * 2)); // 200-600ms
+  // Premium timing: slow enough to feel satisfying, fast enough to not block gameplay
+  const duration = Math.min(1400, Math.max(800, Math.abs(diff) * 4)); // 800-1400ms
   const startTime = performance.now();
+  const isGain = diff > 0;
+  const accentColor = isGain ? '#00E676' : '#FF5252'; // vivid green / vivid red
+  const glowColor   = isGain ? 'rgba(0,230,118,0.35)' : 'rgba(255,82,82,0.3)';
+
+  // Initial scale pop
+  balEl.style.transform = 'scale(1.08)';
+  balEl.style.textShadow = `0 0 12px ${glowColor}`;
 
   function tick(now) {
     const elapsed = now - startTime;
     const t = Math.min(elapsed / duration, 1);
-    // Ease-out cubic
-    const eased = 1 - Math.pow(1 - t, 3);
+    // Custom ease: fast start → slow middle → gentle land (ease-in-out quart)
+    const eased = t < 0.5
+      ? 8 * t * t * t * t
+      : 1 - Math.pow(-2 * t + 2, 4) / 2;
     const current = Math.round(startVal + diff * eased);
     _displayedBalance[slot] = current;
     balEl.textContent = `$${current.toLocaleString()}`;
     balEl.classList.toggle('hud-player__balance--negative', current < 0);
-    // Flash green/red on change
-    if (t < 0.5) {
-      balEl.style.color = diff > 0 ? '#4CAF50' : '#E53935';
+
+    // Color phases: accent → fade → restore
+    if (t < 0.6) {
+      // Hold accent color for first 60% of animation
+      balEl.style.color = accentColor;
     } else {
+      // Fade back to default over remaining 40%
+      const fadeT = (t - 0.6) / 0.4; // 0→1 over the fade phase
       balEl.style.color = '';
+      balEl.style.opacity = String(0.7 + 0.3 * fadeT); // subtle opacity pulse
     }
+
+    // Scale: pop at start → settle back smoothly
+    const scaleT = Math.min(t * 3, 1); // reach 1.0 by 33% of duration
+    const scale = 1.08 - 0.08 * scaleT;
+    balEl.style.transform = `scale(${scale})`;
+
+    // Glow fades out over animation
+    const glowOpacity = Math.max(0, 1 - t * 1.5);
+    balEl.style.textShadow = glowOpacity > 0.01
+      ? `0 0 ${12 * glowOpacity}px ${glowColor}` : 'none';
+
     if (t < 1) {
       _balanceAnimFrames[slot] = requestAnimationFrame(tick);
     } else {
+      // Final state: clean up all inline styles
       _displayedBalance[slot] = targetValue;
       balEl.textContent = `$${targetValue.toLocaleString()}`;
       balEl.style.color = '';
+      balEl.style.transform = '';
+      balEl.style.textShadow = '';
+      balEl.style.opacity = '';
     }
   }
   _balanceAnimFrames[slot] = requestAnimationFrame(tick);
@@ -2462,11 +2493,18 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
         await flashCenterEvent(`${payerName} paid $${ev.rent} rent`, null, `-$${ev.rent}`, 1500);
       }
     } else if (ev.type === 'BET_PLACED') {
-      const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
-      // Look up space name from BOARD — ev.spaceName may be missing in postgres_changes path
-      const betSpace = BOARD.find(s => String(s.id) === String(ev.betValue));
-      const betSpaceName = ev.spaceName || (betSpace ? betSpace.name : ev.betValue) || '???';
-      await flashCenterEvent(`${bettorName} bet on ${betSpaceName}!`, null, '-$150', 1200);
+      // Dedup: broadcast + postgres_changes generate different event IDs for same bet
+      const betKey = `BET-${ev.bettor}-${ev.betValue}`;
+      if (ev.bettor === localId || betKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = betKey;
+        const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
+        // Look up space name from BOARD — ev.spaceName may be missing in postgres_changes path
+        const betSpace = BOARD.find(s => String(s.id) === String(ev.betValue));
+        const betSpaceName = ev.spaceName || (betSpace ? betSpace.name : ev.betValue) || '???';
+        await flashCenterEvent(`${bettorName} bet on ${betSpaceName}!`, null, '-$150', 1200);
+      }
     } else if (ev.type === 'KICK') {
       const kickedName = payloadState.players?.[ev.kicked]?.name || 'Opponent';
       await flashCenterEvent(`${kickedName} was kicked for 3x AFK!`, null, '\uD83D\uDEAB', 2500);
@@ -2525,39 +2563,66 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
         state.buildings[ev.spaceId] = 0;
         if (sp) resetTileBandColor(ev.spaceId, sp);
       }
-      const sellerName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await animateCoins('bank', ev.p, 2);
-      await flashCenterEvent(`${sellerName} sold ${sp?.name || 'a property'}!`, null, `+$${ev.salePrice}`, 1200);
+      // Dedup: broadcast + postgres_changes generate different event IDs
+      const sellKey = `SELL-${ev.p}-${ev.spaceId}`;
+      if (ev.p === localId || sellKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = sellKey;
+        const sellerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+        await animateCoins('bank', ev.p, 2);
+        await flashCenterEvent(`${sellerName} sold ${sp?.name || 'a property'}!`, null, `+$${ev.salePrice}`, 1200);
+      }
     } else if (ev.type === 'BUILD') {
       // Fix 5: remote player sees building icon + notification
       updateBuildingIcons(ev.spaceId);
       updateTileOwnerBand(ev.spaceId, ev.p);
-      const builderName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      const sp2 = BOARD.find(s => s.id === ev.spaceId);
-      await flashCenterEvent(`\uD83C\uDFD7\uFE0F ${builderName} built on ${sp2?.name}!`, null, `\u00D7${ev.count} \uD83C\uDFE0`, 1200);
-    } else if (ev.type === 'LUCKY') {
-      // Replay Log pattern: animate token movement for teleport/jail on P2's screen
-      const playerName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      const sign = ev.amount > 0 ? '+' : '';
-      await flashCenterEvent(
-        `\uD83C\uDCCF ${playerName} drew: ${ev.cardName}`, null,
-        ev.amount !== 0 ? `${sign}$${ev.amount}` : ev.cardText, 2000
-      );
-      // Animate teleport path on P2's screen (if applicable)
-      if (ev.teleportTo && ev.fromPos !== undefined && ev.teleportSteps) {
-        await animateTokenAlongPath(ev.p, ev.fromPos, ev.teleportSteps, ev.passedGenesis || false);
+      // Dedup: broadcast + postgres_changes generate different event IDs
+      const buildKey = `BUILD-${ev.p}-${ev.spaceId}-${ev.count}`;
+      if (ev.p === localId || buildKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = buildKey;
+        const builderName = payloadState.players?.[ev.p]?.name || 'Opponent';
+        const sp2 = BOARD.find(s => s.id === ev.spaceId);
+        await flashCenterEvent(`\uD83C\uDFD7\uFE0F ${builderName} built on ${sp2?.name}!`, null, `\u00D7${ev.count} \uD83C\uDFE0`, 1200);
       }
-      // Animate jail movement on P2's screen (if applicable)
-      if (ev.jail && ev.fromPos !== undefined) {
-        const jailId = 22;
-        const jailSteps = ((jailId - ev.fromPos) + 28) % 28 || 28;
-        await animateTokenAlongPath(ev.p, ev.fromPos, jailSteps, false);
+    } else if (ev.type === 'LUCKY') {
+      // Dedup: broadcast + postgres_changes generate different event IDs
+      const luckyKey = `LUCKY-${ev.p}-${ev.cardName}`;
+      if (ev.p === localId || luckyKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = luckyKey;
+        // Replay Log pattern: animate token movement for teleport/jail on P2's screen
+        const playerName = payloadState.players?.[ev.p]?.name || 'Opponent';
+        const sign = ev.amount > 0 ? '+' : '';
+        await flashCenterEvent(
+          `\uD83C\uDCCF ${playerName} drew: ${ev.cardName}`, null,
+          ev.amount !== 0 ? `${sign}$${ev.amount}` : ev.cardText, 2000
+        );
+        // Animate teleport path on P2's screen (if applicable)
+        if (ev.teleportTo && ev.fromPos !== undefined && ev.teleportSteps) {
+          await animateTokenAlongPath(ev.p, ev.fromPos, ev.teleportSteps, ev.passedGenesis || false);
+        }
+        // Animate jail movement on P2's screen (if applicable)
+        if (ev.jail && ev.fromPos !== undefined) {
+          const jailId = 22;
+          const jailSteps = ((jailId - ev.fromPos) + 28) % 28 || 28;
+          await animateTokenAlongPath(ev.p, ev.fromPos, jailSteps, false);
+        }
       }
     } else if (ev.type === 'STAKING_WIN') {
-      // Fix 8: remote player sees jackpot win
-      const name = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await animateCoins('bank', ev.p, Math.min(Math.ceil(ev.payout / 50), 10));
-      await flashCenterEvent(`\uD83D\uDCB0 ${name} won ${ev.pct}% of the Staking Pool!`, null, `+$${ev.payout}`, 2000);
+      // Dedup: fast-path END_TURN + financialEvent already animated this
+      const stakKey = `STAKING-${ev.p}-${ev.payout}`;
+      if (ev.p === localId || stakKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = stakKey;
+        const name = payloadState.players?.[ev.p]?.name || 'Opponent';
+        await animateCoins('bank', ev.p, Math.min(Math.ceil(ev.payout / 50), 10));
+        await flashCenterEvent(`\uD83D\uDCB0 ${name} won ${ev.pct}% of the Staking Pool!`, null, `+$${ev.payout}`, 2000);
+      }
     } else if (ev.type === 'JAIL_TURN') {
       // Show opponent notification for jailed player's turn
       const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
@@ -2569,12 +2634,24 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
         await flashCenterEvent(`\uD83D\uDD12 ${pName} is in Jail \u2014 deciding their fate...`, 'jail.png', '\u23ED\uFE0F', 2000);
       }
     } else if (ev.type === 'JAIL_EXIT') {
-      const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await animateCoins(ev.p, 'bank', 3);
-      await flashCenterEvent(`${pName} paid $150 and escaped Jail!`, null, '-$150', 1500);
+      const jailExKey = `JAILEXIT-${ev.p}`;
+      if (ev.p === localId || jailExKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = jailExKey;
+        const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
+        await animateCoins(ev.p, 'bank', 3);
+        await flashCenterEvent(`${pName} paid $150 and escaped Jail!`, null, '-$150', 1500);
+      }
     } else if (ev.type === 'JAIL_SENT') {
-      const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
-      await flashCenterEvent(`${pName} was sent to Jail!`, null, '\uD83D\uDD12', 1500);
+      const jailKey = `JAIL-${ev.p}`;
+      if (ev.p === localId || jailKey === _lastAnimatedKey) {
+        _lastAnimatedKey = '';
+      } else {
+        _lastAnimatedKey = jailKey;
+        const pName = payloadState.players?.[ev.p]?.name || 'Opponent';
+        await flashCenterEvent(`${pName} was sent to Jail!`, null, '\uD83D\uDD12', 1500);
+      }
     }
   }
 
@@ -2791,10 +2868,12 @@ async function init() {
         const payerName = fullState.players?.[fe.p]?.name || 'Opponent';
         await flashCenterEvent(`${payerName} paid $${fe.rent} rent`, null, `-$${fe.rent}`, 1500);
       } else if (fe.type === 'STAKING_WIN' && fe.payout > 0) {
+        _lastAnimatedKey = `STAKING-${fe.p}-${fe.payout}`;
         const name = fullState.players?.[fe.p]?.name || 'Opponent';
         await animateCoins('bank', fe.p, Math.min(Math.ceil(fe.payout / 50), 10));
         await flashCenterEvent(`${name} won ${fe.pct}% of the Staking Pool!`, null, `+$${fe.payout}`, 2000);
       } else if (fe.type === 'JAIL_SENT') {
+        _lastAnimatedKey = `JAIL-${fe.p}`;
         const name = fullState.players?.[fe.p]?.name || 'Opponent';
         await flashCenterEvent(`${name} was sent to Jail!`, null, '\uD83D\uDD12', 1500);
       }
