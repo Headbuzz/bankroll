@@ -427,58 +427,170 @@ body {
 
 
 /* ══════════════════════════════════════════════
-   SIDE PLAYER CARDS
+   SIDE PLAYER CARDS — Two-Zone Premium Layout
    ============================================== */
 .hud-player {
   position: fixed;
   bottom: 16px;
   z-index: 100;
-  background: rgba(255,255,255,.95);
-  color: var(--text-dark);
-  border-radius: 14px;
-  padding: 14px 18px;
-  min-width: 170px;
-  box-shadow: var(--shadow-card);
-  border: 1px solid rgba(0,0,0,.06);
+  background: #FFFFFF;
+  border-radius: 16px;
+  min-width: 185px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.05);
+  border: 1px solid rgba(0,0,0,0.04);
+  overflow: hidden;
 }
 .hud-player--left  { left: 16px; }
 .hud-player--right { right: 16px; }
 
+/* ── Zone 1: Identity Header (dark strip) ── */
+.hud-player__header {
+  background: rgba(36, 40, 54, 0.94);
+  padding: 10px 16px 12px;
+  position: relative;
+}
+.hud-player__accent {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2.5px;
+  border-radius: 2px 2px 0 0;
+}
 .hud-player__label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 1px;
+  letter-spacing: 1.5px;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: rgba(255,255,255,0.88);
 }
 .hud-player__token-icon {
   width: 28px; height: 28px;
   object-fit: contain;
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.4));
+}
+.hud-player__turn-timer-text {
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.40);
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+.hud-player__turn-timer-wrap {
+  width: 100%;
+  background: rgba(255,255,255,0.08);
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.hud-player__turn-timer-bar {
+  height: 100%;
+  width: 100%;
+  border-radius: 2px;
+  transition: width 1s linear, background-color 0.3s;
+}
+
+/* ── Zone 2: Financial Widget (inset panel) ── */
+.hud-player__finance {
+  background: rgba(245, 246, 250, 1);
+  margin: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.05);
 }
 .hud-player__balance {
-  font-family: var(--font-display);
-  font-size: 26px;
-  color: var(--text-dark);
-  margin: 4px 0 2px;
+  font-family: var(--font-body);
+  font-size: 28px;
+  font-weight: 800;
+  color: #1A1A2E;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.hud-player__delta {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 6px;
+  margin-left: 4px;
+  letter-spacing: 0.3px;
+  vertical-align: middle;
+  position: relative;
+  top: -2px;
+}
+.hud-player__delta--up {
+  color: #26A69A;
+  background: rgba(38,166,154,0.10);
+}
+.hud-player__delta--down {
+  color: #EF5350;
+  background: rgba(239,83,80,0.10);
+}
+.hud-player__delta--flat {
+  color: var(--text-muted);
+  background: rgba(0,0,0,0.04);
+}
+
+/* Sparkline */
+.hud-player__spark-wrap {
+  width: 100%;
+  height: 40px;
+  margin: 6px 0 4px;
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+}
+.hud-player__spark-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Progress track + net worth */
+.hud-player__nw-bar-wrap {
+  width: 100%;
+  height: 3px;
+  background: rgba(0,0,0,0.06);
+  border-radius: 2px;
+  margin: 2px 0 4px;
+  overflow: hidden;
+}
+.hud-player__nw-bar {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 600ms ease, background 400ms ease;
 }
 .hud-player__net {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   font-size: 10px;
-  color: var(--text-muted);
+  color: rgba(0,0,0,0.35);
+  font-weight: 500;
+}
+.hud-player__nw-pct {
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: auto;
+}
+
+/* ── Zone 3: Footer (badge + buttons) ── */
+.hud-player__footer {
+  padding: 6px 16px 14px;
 }
 .hud-player__turn-badge {
   display: inline-block;
   background: var(--accent-roll);
   color: #FFF;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 800;
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: 8px;
-  margin-top: 4px;
   letter-spacing: 0.5px;
 }
 .hud-player__actions {
@@ -487,29 +599,9 @@ body {
   margin-top: 10px;
 }
 
-.hud-player__turn-timer-wrap {
-  width: 100%;
-  background: var(--bg-bar);
-  height: 6px;
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 12px;
-}
-.hud-player__turn-timer-bar {
-  height: 100%;
-  background: var(--accent-roll);
-  width: 100%;
-  transition: width 1s linear, background-color 0.3s;
-}
-.hud-player__turn-timer-text {
-  font-size: 10px;
-  font-weight: 800;
-  color: var(--text-muted);
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+/* ── Negative balance ── */
+.hud-player__balance--negative {
+  color: #EF5350 !important;
 }
 
 
@@ -572,7 +664,7 @@ body {
 
 
 /* ══════════════════════════════════════════════
-   PROPERTY CARD OVERLAY — Bigger image
+   PROPERTY CARD OVERLAY
    ============================================== */
 .overlay {
   position: fixed; inset: 0; z-index: 600;
@@ -664,60 +756,6 @@ body {
   padding: 1px 6px;
   border-radius: 4px;
 }
-
-
-/* ══════════════════════════════════════════════
-   NEGATIVE BALANCE
-   ============================================== */
-.hud-player__balance--negative {
-  color: #F44336 !important;
-}
-
-
-/* ══════════════════════════════════════════════
-   NET WORTH PROGRESS BAR
-   ============================================== */
-.hud-player__nw-bar-wrap {
-  width: 100%;
-  height: 4px;
-  background: rgba(0,0,0,.08);
-  border-radius: 2px;
-  margin: 4px 0 2px;
-  overflow: hidden;
-}
-.hud-player__nw-bar {
-  height: 100%;
-  border-radius: 2px;
-  transition: width 600ms ease, background 400ms ease;
-}
-
-
-/* ══════════════════════════════════════════════
-   IN-CARD SPARKLINE
-   ============================================== */
-.hud-player__spark-wrap {
-  width: 100%;
-  height: 36px;
-  margin: 4px 0 2px;
-  border-radius: 6px;
-  overflow: hidden;
-  position: relative;
-}
-.hud-player__spark-canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
-}
-.hud-player__delta {
-  font-size: 11px;
-  font-weight: 700;
-  margin-left: 6px;
-  letter-spacing: 0.3px;
-}
-.hud-player__delta--up   { color: #26A69A; }
-.hud-player__delta--down { color: #EF5350; }
-.hud-player__delta--flat { color: var(--text-muted); }
-
 
 /* ══════════════════════════════════════════════
    BUILD BUTTON

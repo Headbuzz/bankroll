@@ -9,6 +9,13 @@
 
 import { supabase, getUser } from './supabase.js';
 
+// ── XSS protection: sanitize user-supplied strings before innerHTML injection ──
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 let roomCode = sessionStorage.getItem('bankroll_room');
 let localId = null;
 // Event dedup: tracks all processed event IDs in a bounded rolling Set.
@@ -1689,14 +1696,14 @@ function drawPlayerSparkline(playerId) {
 
   // Stroke the line
   ctx.strokeStyle = lineColor;
-  ctx.lineWidth = 1.8;
+  ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.stroke();
 
   // Gradient area fill under the curve
   const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, fillColor + '0.18)');
+  grad.addColorStop(0, fillColor + '0.22)');
   grad.addColorStop(1, fillColor + '0.0)');
   ctx.lineTo(W, H);
   ctx.lineTo(0, H);
@@ -1704,12 +1711,16 @@ function drawPlayerSparkline(playerId) {
   ctx.fillStyle = grad;
   ctx.fill();
 
-  // Endpoint dot
+  // Endpoint dot with subtle glow
   const ex = toX(len - 1), ey = toY(pts[len - 1]);
+  ctx.save();
+  ctx.shadowColor = lineColor;
+  ctx.shadowBlur = 6;
   ctx.fillStyle = lineColor;
   ctx.beginPath();
-  ctx.arc(ex, ey, 2.5, 0, Math.PI * 2);
+  ctx.arc(ex, ey, 3.5, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
 }
 
 
@@ -1730,20 +1741,23 @@ function renderHUD() {
 function renderBalances() {
   for (const slot of ['p1', 'p2']) {
     const player = state.players[slot];
+    const hudId = slot === 'p1' ? 'player1' : 'player2';
     // Balance
-    const balEl = document.querySelector(`#${slot === 'p1' ? 'player1' : 'player2'}-hud .hud-player__balance`);
+    const balEl = document.querySelector(`#${hudId}-hud .hud-player__balance`);
     if (balEl) {
       balEl.textContent = `$${player.balance.toLocaleString()}`;
       balEl.classList.toggle('hud-player__balance--negative', player.balance < 0);
     }
-    // Net Worth bar + label
+    // Net Worth bar + label + percentage
     const nw = calculateNetWorth(slot);
     const nwPct = Math.min(100, Math.round((nw / state.winTarget) * 100));
     const nwColor = nwPct >= 90 ? '#E53935' : nwPct >= 75 ? '#FF9800' : nwPct >= 50 ? '#FFC107' : '#4CAF50';
-    const bar = document.querySelector(`#${slot === 'p1' ? 'player1' : 'player2'}-hud .hud-player__nw-bar`);
+    const bar = document.querySelector(`#${hudId}-hud .hud-player__nw-bar`);
     if (bar) { bar.style.width = `${nwPct}%`; bar.style.background = nwColor; }
-    const nwLabel = document.querySelector(`#${slot === 'p1' ? 'player1' : 'player2'}-hud .hud-player__net span:last-child`);
+    const nwLabel = document.querySelector(`#${hudId}-hud .hud-player__net span:nth-child(2)`);
     if (nwLabel) { nwLabel.textContent = `$${nw.toLocaleString()} / $${state.winTarget.toLocaleString()}`; nwLabel.style.color = nwColor; }
+    const pctEl = document.querySelector(`#${hudId}-hud .hud-player__nw-pct`);
+    if (pctEl) { pctEl.textContent = `${nwPct}%`; pctEl.style.color = nwColor; }
   }
   updateStakingPoolDisplay();
 }
@@ -1755,14 +1769,22 @@ function renderPlayerCard(elId, player, playerId) {
   const isLocalClient = playerId === localId;
   const netWorth = calculateNetWorth(playerId);
   const inJail = player.jailTurns > 0;
+  const safeName = escapeHtml(player.name);
 
+  // Player accent color
+  const accentColor = playerId === 'p1' ? '#E53935' : '#1E88E5';
+
+  // Timer bar color: use player's accent color
+  const timerBarColor = accentColor;
+
+  // Actions
   let actionsHtml = '';
   if (isMyTurn && isLocalClient && !state.rolling && !state.gameOver && !state.trade.active) {
     const canTrade = player.balance >= 60 && getOwnedProperties(playerId === 'p1' ? 'p2' : 'p1').length > 0;
     actionsHtml = `
       <div class="hud-player__actions">
-        <button class="btn btn--primary btn--hud" id="btn-roll-${playerId}">${inJail ? 'END TURN' : '🎲 ROLL'}</button>
-        <button class="btn btn--secondary btn--hud ${canTrade ? '' : 'btn--disabled'}" id="btn-trade-${playerId}" ${canTrade ? '' : 'disabled'}>💱 TRADE</button>
+        <button class="btn btn--primary btn--hud" id="btn-roll-${playerId}">${inJail ? 'END TURN' : '\uD83C\uDFB2 ROLL'}</button>
+        <button class="btn btn--secondary btn--hud ${canTrade ? '' : 'btn--disabled'}" id="btn-trade-${playerId}" ${canTrade ? '' : 'disabled'}>\uD83D\uDCB1 TRADE</button>
       </div>
     `;
   }
@@ -1770,7 +1792,7 @@ function renderPlayerCard(elId, player, playerId) {
   const nwPct = Math.min(100, Math.round((netWorth / state.winTarget) * 100));
   const nwBarColor = nwPct >= 90 ? '#E53935' : nwPct >= 75 ? '#FF9800' : nwPct >= 50 ? '#FFC107' : '#4CAF50';
 
-  // Delta badge: show change since last recorded data point
+  // Delta badge
   const history = nwHistory[playerId];
   let deltaHtml = '';
   if (history && history.length >= 2) {
@@ -1783,35 +1805,52 @@ function renderPlayerCard(elId, player, playerId) {
     }
   }
 
+  // Timer (inside header)
   let timerHtml = '';
   if (isMyTurn && !state.gameOver) {
     timerHtml = `
       <div class="hud-player__turn-timer-text">TURN TIME <span><span id="turn-sec-${playerId}">40</span>s</span></div>
       <div class="hud-player__turn-timer-wrap">
-        <div class="hud-player__turn-timer-bar" id="turn-bar-${playerId}" style="width:100%"></div>
+        <div class="hud-player__turn-timer-bar" id="turn-bar-${playerId}" style="width:100%;background:${timerBarColor}"></div>
+      </div>
+    `;
+  }
+
+  // Footer (badge + buttons)
+  let footerHtml = '';
+  if (isMyTurn || actionsHtml) {
+    footerHtml = `
+      <div class="hud-player__footer">
+        ${isMyTurn ? `<span class="hud-player__turn-badge">${inJail ? '\uD83D\uDD12 In Jail' : 'Your Turn'}</span>` : ''}
+        ${actionsHtml}
       </div>
     `;
   }
 
   el.innerHTML = `
-    ${timerHtml}
-    <div class="hud-player__label">
-      <img class="hud-player__token-icon" src="${IMG}${player.tokenImg}" alt="${player.name}"/>
-      ${player.name}
+    <div class="hud-player__header">
+      <div class="hud-player__accent" style="background:${accentColor}"></div>
+      ${timerHtml}
+      <div class="hud-player__label">
+        <img class="hud-player__token-icon" src="${IMG}${player.tokenImg}" alt="${safeName}"/>
+        ${safeName}
+      </div>
     </div>
-    <div class="hud-player__balance ${player.balance < 0 ? 'hud-player__balance--negative' : ''}">$${player.balance.toLocaleString()}${deltaHtml}</div>
-    <div class="hud-player__spark-wrap">
-      <canvas class="hud-player__spark-canvas" id="spark-${playerId}"></canvas>
+    <div class="hud-player__finance">
+      <div class="hud-player__balance ${player.balance < 0 ? 'hud-player__balance--negative' : ''}">$${player.balance.toLocaleString()}${deltaHtml}</div>
+      <div class="hud-player__spark-wrap">
+        <canvas class="hud-player__spark-canvas" id="spark-${playerId}"></canvas>
+      </div>
+      <div class="hud-player__nw-bar-wrap">
+        <div class="hud-player__nw-bar" style="width:${nwPct}%;background:${nwBarColor}"></div>
+      </div>
+      <div class="hud-player__net">
+        <span>Net Worth</span>
+        <span style="color:${nwBarColor};font-weight:700">$${netWorth.toLocaleString()} / $${state.winTarget.toLocaleString()}</span>
+        <span class="hud-player__nw-pct" style="color:${nwBarColor}">${nwPct}%</span>
+      </div>
     </div>
-    <div class="hud-player__nw-bar-wrap">
-      <div class="hud-player__nw-bar" style="width:${nwPct}%;background:${nwBarColor}"></div>
-    </div>
-    <div class="hud-player__net">
-      <span>Net Worth</span>
-      <span style="color:${nwBarColor};font-weight:700">$${netWorth.toLocaleString()} / $${state.winTarget.toLocaleString()}</span>
-    </div>
-    ${isMyTurn ? `<span class="hud-player__turn-badge">${inJail ? '🔒 In Jail' : 'Your Turn'}</span>` : ''}
-    ${actionsHtml}
+    ${footerHtml}
   `;
 
   // Draw sparkline on the just-inserted canvas
