@@ -510,6 +510,7 @@ body {
   color: #1A1A2E;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
+  transition: color 0.3s ease;
 }
 .hud-player__delta {
   display: inline-block;

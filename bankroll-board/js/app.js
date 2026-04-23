@@ -1744,22 +1744,73 @@ function renderHUD() {
   // Fix 14: do NOT call updateTimerUI here — the timer updates via its own setInterval.
   // Calling it here caused a full DOM rebuild on every timer tick (once per second).
   updateStakingPoolDisplay();
+  // Kick off balance counting animation after card rebuild
+  animateBalanceTo('p1', state.players.p1.balance);
+  animateBalanceTo('p2', state.players.p2.balance);
 }
 
 /* ── Fast balance-only updater — called from hot animation paths (RENT, BUY, staking, genesis)
    Avoids rebuilding the full player card HTML — only touches 3 text nodes.
    Use renderHUD() when button state or turn badge may also change. */
+// Track displayed balance for counting animation (maps slot -> displayed value)
+const _displayedBalance = { p1: null, p2: null };
+let _balanceAnimFrames = { p1: null, p2: null };
+
+function animateBalanceTo(slot, targetValue) {
+  const hudId = slot === 'p1' ? 'player1' : 'player2';
+  const balEl = document.querySelector(`#${hudId}-hud .hud-player__balance`);
+  if (!balEl) return;
+
+  // Cancel any in-progress animation for this slot
+  if (_balanceAnimFrames[slot]) cancelAnimationFrame(_balanceAnimFrames[slot]);
+
+  // Initialize displayed value on first call
+  if (_displayedBalance[slot] === null) _displayedBalance[slot] = targetValue;
+
+  const startVal = _displayedBalance[slot];
+  const diff = targetValue - startVal;
+  if (diff === 0) {
+    balEl.textContent = `$${targetValue.toLocaleString()}`;
+    balEl.classList.toggle('hud-player__balance--negative', targetValue < 0);
+    return;
+  }
+
+  const duration = Math.min(600, Math.max(200, Math.abs(diff) * 2)); // 200-600ms
+  const startTime = performance.now();
+
+  function tick(now) {
+    const elapsed = now - startTime;
+    const t = Math.min(elapsed / duration, 1);
+    // Ease-out cubic
+    const eased = 1 - Math.pow(1 - t, 3);
+    const current = Math.round(startVal + diff * eased);
+    _displayedBalance[slot] = current;
+    balEl.textContent = `$${current.toLocaleString()}`;
+    balEl.classList.toggle('hud-player__balance--negative', current < 0);
+    // Flash green/red on change
+    if (t < 0.5) {
+      balEl.style.color = diff > 0 ? '#4CAF50' : '#E53935';
+    } else {
+      balEl.style.color = '';
+    }
+    if (t < 1) {
+      _balanceAnimFrames[slot] = requestAnimationFrame(tick);
+    } else {
+      _displayedBalance[slot] = targetValue;
+      balEl.textContent = `$${targetValue.toLocaleString()}`;
+      balEl.style.color = '';
+    }
+  }
+  _balanceAnimFrames[slot] = requestAnimationFrame(tick);
+}
+
 function renderBalances() {
   for (const slot of ['p1', 'p2']) {
     const player = state.players[slot];
-    const hudId = slot === 'p1' ? 'player1' : 'player2';
-    // Balance
-    const balEl = document.querySelector(`#${hudId}-hud .hud-player__balance`);
-    if (balEl) {
-      balEl.textContent = `$${player.balance.toLocaleString()}`;
-      balEl.classList.toggle('hud-player__balance--negative', player.balance < 0);
-    }
+    // Animate balance counting instead of instant switch
+    animateBalanceTo(slot, player.balance);
     // Net Worth bar + label + percentage
+    const hudId = slot === 'p1' ? 'player1' : 'player2';
     const nw = calculateNetWorth(slot);
     const nwPct = Math.min(100, Math.round((nw / state.winTarget) * 100));
     const nwColor = nwPct >= 90 ? '#E53935' : nwPct >= 75 ? '#FF9800' : nwPct >= 50 ? '#FFC107' : '#4CAF50';
@@ -1848,7 +1899,7 @@ function renderPlayerCard(elId, player, playerId) {
       </div>
     </div>
     <div class="hud-player__finance">
-      <div class="hud-player__balance ${player.balance < 0 ? 'hud-player__balance--negative' : ''}">$${player.balance.toLocaleString()}${deltaHtml}</div>
+      <div class="hud-player__balance ${player.balance < 0 ? 'hud-player__balance--negative' : ''}">$${(_displayedBalance[playerId] ?? player.balance).toLocaleString()}${deltaHtml}</div>
       <div class="hud-player__nw-bar-wrap">
         <div class="hud-player__nw-bar" style="width:${nwPct}%;background:${nwBarColor}"></div>
       </div>
@@ -2412,7 +2463,10 @@ async function _playbackImpl(payloadState, fromBroadcast = false) {
       }
     } else if (ev.type === 'BET_PLACED') {
       const bettorName = payloadState.players?.[ev.bettor]?.name || 'Opponent';
-      await flashCenterEvent(`${bettorName} bet on ${ev.spaceName}!`, null, '-$150', 1200);
+      // Look up space name from BOARD — ev.spaceName may be missing in postgres_changes path
+      const betSpace = BOARD.find(s => String(s.id) === String(ev.betValue));
+      const betSpaceName = ev.spaceName || (betSpace ? betSpace.name : ev.betValue) || '???';
+      await flashCenterEvent(`${bettorName} bet on ${betSpaceName}!`, null, '-$150', 1200);
     } else if (ev.type === 'KICK') {
       const kickedName = payloadState.players?.[ev.kicked]?.name || 'Opponent';
       await flashCenterEvent(`${kickedName} was kicked for 3x AFK!`, null, '\uD83D\uDEAB', 2500);
@@ -2614,6 +2668,10 @@ function syncBoardState() {
   });
   ['p1', 'p2'].forEach(p => {
     if (animatingTokens.has(p)) return; // skip: float animation is in progress
+    // Guard: never reposition the local player's token during an active roll.
+    // Prevents postgres_changes or stale broadcast merges from snapping the token
+    // back to a previous position while the turn flow is still executing.
+    if (state.rolling && p === localId) return;
     removeStaticToken(p);
     placeStaticToken(p);
   });
